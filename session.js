@@ -1,18 +1,15 @@
-const sessions = new Map();
+const db = require("./db");
 
 async function getSession(phone) {
-  if (!sessions.has(phone)) {
-    sessions.set(phone, { step: 'menu', draftDelivery: {} });
-  }
-  return sessions.get(phone);
+  return await db.getSession(phone);
 }
 
 async function saveSession(phone, sessionData) {
-  sessions.set(phone, sessionData);
+  await db.saveSession(phone, sessionData);
 }
 
 async function clearSession(phone) {
-  sessions.set(phone, { step: 'menu', draftDelivery: {} });
+  await db.clearSession(phone);
 }
 
 module.exports = {

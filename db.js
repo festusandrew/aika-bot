@@ -3,7 +3,8 @@ const { Pool } = require("pg");
 let pool = null;
 const memoryDb = {
   vendors: {},
-  deliveries: []
+  deliveries: [],
+  sessions: {}
 };
 
 if (process.env.DATABASE_URL) {
@@ -22,6 +23,11 @@ if (process.env.DATABASE_URL) {
           phone VARCHAR PRIMARY KEY,
           name VARCHAR,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+          phone VARCHAR PRIMARY KEY,
+          session_data JSONB,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS deliveries (
           id SERIAL PRIMARY KEY,
@@ -107,8 +113,45 @@ async function createDelivery(delivery) {
   return newDelivery;
 }
 
+async function getSession(phone) {
+  if (pool) {
+    try {
+      const res = await pool.query("SELECT session_data FROM sessions WHERE phone = $1", [phone]);
+      return res.rows[0]?.session_data || { step: 'menu', draftDelivery: {} };
+    } catch (err) {
+      console.error("DB getSession error:", err);
+    }
+  }
+  return memoryDb.sessions[phone] || { step: 'menu', draftDelivery: {} };
+}
+
+async function saveSession(phone, sessionData) {
+  if (pool) {
+    try {
+      await pool.query(
+        `INSERT INTO sessions (phone, session_data, updated_at) 
+         VALUES ($1, $2, NOW()) 
+         ON CONFLICT (phone) DO UPDATE SET session_data = $2, updated_at = NOW()`,
+        [phone, sessionData]
+      );
+      return;
+    } catch (err) {
+      console.error("DB saveSession error:", err);
+    }
+  }
+  memoryDb.sessions[phone] = sessionData;
+}
+
+async function clearSession(phone) {
+  const defaultSession = { step: 'menu', draftDelivery: {} };
+  await saveSession(phone, defaultSession);
+}
+
 module.exports = {
   getVendor,
   createVendor,
-  createDelivery
+  createDelivery,
+  getSession,
+  saveSession,
+  clearSession
 };
