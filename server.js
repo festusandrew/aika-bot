@@ -28,6 +28,23 @@ app.post("/webhook", (req, res) => {
     res.sendStatus(200);
 });
 
+async function sendMessage(to, text) {
+  await axios.post(
+    `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: "whatsapp",
+      to,
+      text: { body: text }
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log("Aika bot running on port", PORT);
