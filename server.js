@@ -113,6 +113,8 @@ User message: "${text}"
   const response = await result.response;
   const textOutput = response.text();
 
+  console.log("RAW GEMINI OUTPUT:", textOutput);
+
   // Gemini sometimes wraps JSON in text, so clean it:
   const cleaned = textOutput.replace(/```json|```/g, "").trim();
 
