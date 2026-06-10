@@ -50,7 +50,8 @@ app.post("/webhook", async (req, res) => {
         // Save business name
         await db.createVendor(userPhone, userText);
         const updatedVendor = await db.getVendor(userPhone);
-        await sendText(userPhone, `Awesome, registered business: ${updatedVendor.name}! 🎉`);
+        const businessName = updatedVendor ? updatedVendor.name : userText;
+        await sendText(userPhone, `Awesome, registered business: ${businessName}! 🎉`);
         
         session.step = "menu";
         await sessionManager.saveSession(userPhone, session);

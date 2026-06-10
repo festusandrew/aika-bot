@@ -57,7 +57,7 @@ async function getVendor(phone) {
       const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
       return res.rows[0] || null;
     } catch (err) {
-      console.error("DB getVendor error:", err);
+      console.error("DB getVendor error, falling back to memory:", err);
     }
   }
   return memoryDb.vendors[phone] || null;
@@ -72,7 +72,7 @@ async function createVendor(phone, name) {
       );
       return res.rows[0];
     } catch (err) {
-      console.error("DB createVendor error:", err);
+      console.error("DB createVendor error, falling back to memory:", err);
     }
   }
   memoryDb.vendors[phone] = { phone, name };
@@ -96,7 +96,7 @@ async function createDelivery(delivery) {
       );
       return res.rows[0];
     } catch (err) {
-      console.error("DB createDelivery error:", err);
+      console.error("DB createDelivery error, falling back to memory:", err);
     }
   }
   
@@ -117,9 +117,11 @@ async function getSession(phone) {
   if (pool) {
     try {
       const res = await pool.query("SELECT session_data FROM sessions WHERE phone = $1", [phone]);
-      return res.rows[0]?.session_data || { step: 'menu', draftDelivery: {} };
+      if (res.rows[0]) {
+        return res.rows[0].session_data;
+      }
     } catch (err) {
-      console.error("DB getSession error:", err);
+      console.error("DB getSession error, falling back to memory:", err);
     }
   }
   return memoryDb.sessions[phone] || { step: 'menu', draftDelivery: {} };
@@ -134,9 +136,10 @@ async function saveSession(phone, sessionData) {
          ON CONFLICT (phone) DO UPDATE SET session_data = $2, updated_at = NOW()`,
         [phone, sessionData]
       );
+      memoryDb.sessions[phone] = sessionData; // Warm cache sync
       return;
     } catch (err) {
-      console.error("DB saveSession error:", err);
+      console.error("DB saveSession error, falling back to memory:", err);
     }
   }
   memoryDb.sessions[phone] = sessionData;
