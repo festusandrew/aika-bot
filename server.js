@@ -69,6 +69,36 @@ async function sendMessage(to, text) {
   );
 }
 
+async function parseDelivery(text) {
+  const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  const prompt = `
+You are Aika, a logistics assistant for a delivery company in Nigeria.
+
+Extract delivery information from this message:
+
+Return ONLY valid JSON in this format:
+{
+  "intent": "create_delivery",
+  "pickup": "",
+  "dropoff": "",
+  "item": "",
+  "needs_more_info": true/false
+}
+
+User message: "${text}"
+`;
+
+  const result = await model.generateContent(prompt);
+  const response = await result.response;
+  const textOutput = response.text();
+
+  // Gemini sometimes wraps JSON in text, so clean it:
+  const cleaned = textOutput.replace(/```json|```/g, "").trim();
+
+  return JSON.parse(cleaned);
+}
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log("Aika bot running on port", PORT);
