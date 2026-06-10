@@ -68,6 +68,22 @@ app.post("/webhook", async (req, res) => {
     if (buttonId) {
       if (buttonId === "btn_new_delivery" || buttonId === "btn_track" || buttonId === "btn_account") {
         await handleMenu(userPhone, buttonId, session);
+      } else if (buttonId === "confirm_address" || buttonId === "edit_address") {
+        if (buttonId === "confirm_address") {
+          session.draftDelivery.pickupLabel = "Main Warehouse";
+          session.draftDelivery.category = "General Package";
+          session.draftDelivery.valueLabel = "Standard delivery";
+          session.draftDelivery.cod = false;
+          session.draftDelivery.codAmount = 0;
+
+          session.step = "awaiting_confirmation";
+          await sessionManager.saveSession(userPhone, session);
+          await showDeliverySummary(userPhone, session.draftDelivery);
+        } else if (buttonId === "edit_address") {
+          await sendText(userPhone, "Please enter your customer's delivery address:");
+          session.step = "awaiting_address_input";
+          await sessionManager.saveSession(userPhone, session);
+        }
       } else if (buttonId === "confirm_yes" || buttonId === "confirm_no") {
         await handleConfirmSummary(userPhone, buttonId, session);
       }
@@ -75,43 +91,22 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Normal text message handling based on conversational step
-    if (session.step === "awaiting_order_paste") {
-      try {
-        const aiData = await parseDelivery(userText);
-        console.log("AI parsed delivery data:", aiData);
-
-        if (aiData.intent === "create_delivery") {
-          session.draftDelivery = session.draftDelivery || {};
-          
-          if (aiData.pickup) session.draftDelivery.pickupLabel = aiData.pickup;
-          if (aiData.dropoff) session.draftDelivery.address = aiData.dropoff;
-          if (aiData.item) session.draftDelivery.category = aiData.item;
-
-          if (!session.draftDelivery.valueLabel) {
-            session.draftDelivery.valueLabel = "Standard delivery";
-          }
-          if (session.draftDelivery.cod === undefined) {
-            session.draftDelivery.cod = false;
-            session.draftDelivery.codAmount = 0;
-          }
-
-          if (!session.draftDelivery.pickupLabel || !session.draftDelivery.address) {
-            await sessionManager.saveSession(userPhone, session);
-            await sendText(userPhone, "Got it 👍 Can you share the pickup and drop-off locations to proceed?");
-          } else {
-            session.step = "awaiting_confirmation";
-            await sessionManager.saveSession(userPhone, session);
-            await showDeliverySummary(userPhone, session.draftDelivery);
-          }
-        } else {
-          await sendText(userPhone, "I had trouble recognizing a delivery order in that message. Let's try again!");
-          await handleMenu(userPhone, null, session);
-        }
-      } catch (err) {
-        console.error("AI Parse Error:", err);
-        await sendText(userPhone, "Sorry, I had trouble analyzing that. Let's try again!");
-        await handleMenu(userPhone, null, session);
-      }
+    if (session.step === "awaiting_address_input") {
+      session.draftDelivery = { address: userText };
+      session.step = "confirm_address_input";
+      await sessionManager.saveSession(userPhone, session);
+      
+      await sendButtons(userPhone, `Address entered:\n${userText}\n\nIs this correct?`, [
+        { id: "confirm_address", title: "Confirm Address" },
+        { id: "edit_address",    title: "Edit Address" }
+      ]);
+    } else if (session.step === "confirm_address_input") {
+      await sendButtons(userPhone, `Please select one of the options to proceed:\n\nAddress entered:\n${session.draftDelivery.address}`, [
+        { id: "confirm_address", title: "Confirm Address" },
+        { id: "edit_address",    title: "Edit Address" }
+      ]);
+    } else if (session.step === "awaiting_confirmation") {
+      await showDeliverySummary(userPhone, session.draftDelivery);
     } else {
       // Default: show main menu
       await handleMenu(userPhone, null, session);
@@ -177,10 +172,8 @@ async function handleMenu(phone, input, session) {
   }
 
   if (input === 'btn_new_delivery') {
-    await sendText(phone, 
-      `Paste your customer's order message — I'll find the address.\n\nOr just type the delivery address.`
-    );
-    session.step = 'awaiting_order_paste';
+    await sendText(phone, "Please enter your customer's delivery address:");
+    session.step = 'awaiting_address_input';
     session.draftDelivery = {};
     await sessionManager.saveSession(phone, session);
     return;
@@ -224,20 +217,29 @@ async function handleConfirmSummary(phone, buttonId, session) {
     return;
   }
 
+  const trackingCode = generateTrackingCode();
+
   // Create delivery record
   const delivery = await db.createDelivery({
     vendorPhone: phone,
     ...session.draftDelivery,
     status: 'searching',
-    trackingCode: generateTrackingCode()
+    trackingCode: trackingCode
   });
 
-  session.step = 'dispatching';
-  session.deliveryId = delivery.id;
-  await sessionManager.saveSession(phone, session);
+  const destinationAddress = session.draftDelivery.address || "Lagos, Nigeria";
+  const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destinationAddress)}`;
 
-  await sendText(phone, 'Searching for a rider near you...');
-  await dispatchRider(delivery);
+  const message = [
+    `🎉 Delivery created successfully!`,
+    `• Reference Number: ${trackingCode}`,
+    `• Status: Searching for nearby riders... 🚚`,
+    `• Real-time Tracking: ${trackingLink}`
+  ].join('\n');
+
+  await sendText(phone, message);
+
+  await sessionManager.clearSession(phone);
 }
 
 // Helper: Calculate zone fee
