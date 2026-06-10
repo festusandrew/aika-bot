@@ -23,9 +23,30 @@ app.get("/webhook", (req, res) => {
 });
 
 // Receive WhatsApp messages
-app.post("/webhook", (req, res) => {
-    console.log("Incoming message:", JSON.stringify(req.body, null, 2));
-    res.sendStatus(200);
+app.post("/webhook", async (req, res) => {
+  const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+
+  if (!message) return res.sendStatus(200);
+
+  const userText = message.text?.body;
+  const userPhone = message.from;
+
+  console.log("User said:", userText);
+
+  // SIMPLE REPLY LOGIC (NO AI YET)
+  let reply = "";
+
+  if (userText.toLowerCase().includes("hello")) {
+    reply = "Hi 👋 Welcome to Aika. What do you want to send today?";
+  } else if (userText.toLowerCase().includes("send")) {
+    reply = "Got it 👍 Where do we pick up your package from?";
+  } else {
+    reply = "I can help you with deliveries 🚚. Do you want to send a package?";
+  }
+
+  await sendMessage(userPhone, reply);
+
+  res.sendStatus(200);
 });
 
 async function sendMessage(to, text) {
