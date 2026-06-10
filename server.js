@@ -76,22 +76,27 @@ app.post("/webhook", async (req, res) => {
 
     // Normal text message handling based on conversational step
     if (session.step === "awaiting_order_paste") {
-      await sendText(userPhone, "Processing your order details with AI... 🤖");
       try {
         const aiData = await parseDelivery(userText);
         console.log("AI parsed delivery data:", aiData);
 
         if (aiData.intent === "create_delivery") {
-          session.draftDelivery = {
-            pickupLabel: aiData.pickup || "Main Warehouse",
-            address: aiData.dropoff || "",
-            category: aiData.item || "General Items",
-            valueLabel: "Standard delivery",
-            cod: false,
-            codAmount: 0
-          };
+          session.draftDelivery = session.draftDelivery || {};
+          
+          if (aiData.pickup) session.draftDelivery.pickupLabel = aiData.pickup;
+          if (aiData.dropoff) session.draftDelivery.address = aiData.dropoff;
+          if (aiData.item) session.draftDelivery.category = aiData.item;
 
-          if (aiData.needs_more_info || !aiData.pickup || !aiData.dropoff) {
+          if (!session.draftDelivery.valueLabel) {
+            session.draftDelivery.valueLabel = "Standard delivery";
+          }
+          if (session.draftDelivery.cod === undefined) {
+            session.draftDelivery.cod = false;
+            session.draftDelivery.codAmount = 0;
+          }
+
+          if (!session.draftDelivery.pickupLabel || !session.draftDelivery.address) {
+            await sessionManager.saveSession(userPhone, session);
             await sendText(userPhone, "Got it 👍 Can you share the pickup and drop-off locations to proceed?");
           } else {
             session.step = "awaiting_confirmation";
