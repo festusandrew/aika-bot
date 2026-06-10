@@ -27,27 +27,47 @@ app.get("/webhook", (req, res) => {
 
 // Receive WhatsApp messages
 app.post("/webhook", async (req, res) => {
-  const message = req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
+  const message =
+    req.body.entry?.[0]?.changes?.[0]?.value?.messages?.[0];
 
   if (!message) return res.sendStatus(200);
 
   const userText = message.text?.body;
   const userPhone = message.from;
 
-  console.log("User said:", userText);
+  console.log("User:", userText);
 
-  // SIMPLE REPLY LOGIC (NO AI YET)
-  let reply = "";
+  try {
+    const aiData = await parseDelivery(userText);
 
-  if (userText.toLowerCase().includes("hello")) {
-    reply = "Hi 👋 Welcome to Aika. What do you want to send today?";
-  } else if (userText.toLowerCase().includes("send")) {
-    reply = "Got it 👍 Where do we pick up your package from?";
-  } else {
-    reply = "I can help you with deliveries 🚚. Do you want to send a package?";
+    console.log("AI RESPONSE:", aiData);
+
+    let reply = "";
+
+    if (aiData.intent === "create_delivery") {
+      if (aiData.needs_more_info) {
+        reply =
+          "Got it 👍 Can you share pickup and drop-off locations?";
+      } else {
+        reply = `Perfect 🚚
+Pickup: ${aiData.pickup}
+Drop-off: ${aiData.dropoff}
+Item: ${aiData.item}`;
+      }
+    } else {
+      reply =
+        "I can help you send packages 🚚 What do you want to deliver?";
+    }
+
+    await sendMessage(userPhone, reply);
+  } catch (err) {
+    console.log("AI ERROR:", err);
+
+    await sendMessage(
+      userPhone,
+      "I had trouble understanding that. Can you rephrase it?"
+    );
   }
-
-  await sendMessage(userPhone, reply);
 
   res.sendStatus(200);
 });
