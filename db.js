@@ -37,6 +37,7 @@ if (process.env.DATABASE_URL) {
           item VARCHAR,
           status VARCHAR,
           tracking_code VARCHAR,
+          customer_phone VARCHAR,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
       `);
@@ -83,15 +84,16 @@ async function createDelivery(delivery) {
   if (pool) {
     try {
       const res = await pool.query(
-        `INSERT INTO deliveries (vendor_phone, pickup, dropoff, item, status, tracking_code) 
-         VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+        `INSERT INTO deliveries (vendor_phone, pickup, dropoff, item, status, tracking_code, customer_phone) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
         [
           delivery.vendorPhone,
           delivery.pickup || "",
           delivery.dropoff || delivery.address || "",
           delivery.item || delivery.category || "",
           delivery.status || "searching",
-          delivery.trackingCode || ""
+          delivery.trackingCode || "",
+          delivery.customerPhone || ""
         ]
       );
       return res.rows[0];
@@ -107,7 +109,8 @@ async function createDelivery(delivery) {
     dropoff: delivery.dropoff || delivery.address || "",
     item: delivery.item || delivery.category || "",
     status: delivery.status || "searching",
-    tracking_code: delivery.trackingCode || ""
+    tracking_code: delivery.trackingCode || "",
+    customer_phone: delivery.customerPhone || ""
   };
   memoryDb.deliveries.push(newDelivery);
   return newDelivery;
@@ -145,6 +148,72 @@ async function saveSession(phone, sessionData) {
   memoryDb.sessions[phone] = sessionData;
 }
 
+async function updateDeliveryStatus(deliveryId, status) {
+  if (pool) {
+    try {
+      // Try updating by ID first (if it's an integer)
+      const numericId = parseInt(deliveryId, 10);
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = $1 WHERE id = $2 RETURNING *",
+          [status, numericId]
+        );
+        if (res.rows[0]) return res.rows[0];
+      }
+      
+      // Fallback/alternative: update by tracking code
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = $1 WHERE tracking_code = $2 RETURNING *",
+        [status, deliveryId]
+      );
+      return resTracking.rows[0] || null;
+    } catch (err) {
+      console.error("DB updateDeliveryStatus error, falling back to memory:", err);
+    }
+  }
+
+  // Fallback in-memory
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
+  if (delivery) {
+    delivery.status = status;
+    return delivery;
+  }
+  return null;
+}
+
+async function getDeliveryByTrackingCode(trackingCode) {
+  if (pool) {
+    try {
+      const res = await pool.query("SELECT * FROM deliveries WHERE tracking_code = $1", [trackingCode]);
+      return res.rows[0] || null;
+    } catch (err) {
+      console.error("DB getDeliveryByTrackingCode error, falling back to memory:", err);
+    }
+  }
+  return memoryDb.deliveries.find(d => d.tracking_code === trackingCode) || null;
+}
+
+async function getDeliveriesByVendor(vendorPhone) {
+  if (pool) {
+    try {
+      const res = await pool.query(
+        "SELECT * FROM deliveries WHERE vendor_phone = $1 ORDER BY created_at DESC LIMIT 5",
+        [vendorPhone]
+      );
+      return res.rows;
+    } catch (err) {
+      console.error("DB getDeliveriesByVendor error, falling back to memory:", err);
+    }
+  }
+  return memoryDb.deliveries
+    .filter(d => d.vendor_phone === vendorPhone)
+    .slice(-5)
+    .reverse();
+}
+
 async function clearSession(phone) {
   const defaultSession = { step: 'menu', draftDelivery: {} };
   await saveSession(phone, defaultSession);
@@ -154,6 +223,9 @@ module.exports = {
   getVendor,
   createVendor,
   createDelivery,
+  updateDeliveryStatus,
+  getDeliveryByTrackingCode,
+  getDeliveriesByVendor,
   getSession,
   saveSession,
   clearSession

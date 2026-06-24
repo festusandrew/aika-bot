@@ -12,20 +12,20 @@ app.use(express.json());
 
 // Health check (Render uses this)
 app.get("/", (req, res) => {
-    res.send("Aika bot is live 🚀");
+  res.send("Aika bot is live 🚀");
 });
 
 // WhatsApp webhook verification
 app.get("/webhook", (req, res) => {
-    const mode = req.query["hub.mode"];
-    const token = req.query["hub.verify_token"];
-    const challenge = req.query["hub.challenge"];
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
 
-    if (mode === "subscribe" && token === "aika_verify") {
-        return res.status(200).send(challenge);
-    }
+  if (mode === "subscribe" && token === "aika_verify") {
+    return res.status(200).send(challenge);
+  }
 
-    res.sendStatus(403);
+  res.sendStatus(403);
 });
 
 // Receive WhatsApp messages
@@ -39,6 +39,7 @@ app.post("/webhook", async (req, res) => {
   const buttonId = message.interactive?.button_reply?.id || null;
 
   console.log(`User (${userPhone}): text="${userText}" buttonId="${buttonId}"`);
+  console.log("Webhook reached successfully");
 
   try {
     const session = await sessionManager.getSession(userPhone);
@@ -52,13 +53,15 @@ app.post("/webhook", async (req, res) => {
         const updatedVendor = await db.getVendor(userPhone);
         const businessName = updatedVendor ? updatedVendor.name : userText;
         await sendText(userPhone, `Awesome, registered business: ${businessName}! 🎉`);
-        
+
         session.step = "menu";
         await sessionManager.saveSession(userPhone, session);
         await handleMenu(userPhone, null, session);
       } else {
         // Trigger onboarding
+        console.log("Attempting to send onboarding message...");
         await sendText(userPhone, "Hi! Welcome to Aika.\n\nWhat's your business name?");
+        console.log("Onboarding message sent.");
         await sessionManager.saveSession(userPhone, { step: 'onboarding_name' });
       }
       return res.sendStatus(200);
@@ -70,22 +73,80 @@ app.post("/webhook", async (req, res) => {
         await handleMenu(userPhone, buttonId, session);
       } else if (buttonId === "confirm_address" || buttonId === "edit_address") {
         if (buttonId === "confirm_address") {
-          session.draftDelivery.pickupLabel = "Main Warehouse";
-          session.draftDelivery.category = "General Package";
-          session.draftDelivery.valueLabel = "Standard delivery";
-          session.draftDelivery.cod = false;
-          session.draftDelivery.codAmount = 0;
-
-          session.step = "awaiting_confirmation";
+          session.step = "awaiting_customer_phone";
           await sessionManager.saveSession(userPhone, session);
-          await showDeliverySummary(userPhone, session.draftDelivery);
+          await sendText(userPhone, "Please enter the customer's phone number for the rider to call (e.g. 08012345678):");
         } else if (buttonId === "edit_address") {
           await sendText(userPhone, "Please enter your customer's delivery address:");
           session.step = "awaiting_address_input";
           await sessionManager.saveSession(userPhone, session);
         }
+      } else if (buttonId.startsWith("cat_")) {
+        let category = "Others";
+        if (buttonId === "cat_food") category = "Food";
+        else if (buttonId === "cat_clothing") category = "Clothing";
+
+        session.draftDelivery.category = category;
+
+        if (category === "Others") {
+          session.step = "awaiting_package_size";
+          await sessionManager.saveSession(userPhone, session);
+          await sendButtons(userPhone, "Please select the size of the delivery:", [
+            { id: "size_small", title: "Small (fits in bag)" },
+            { id: "size_medium", title: "Medium (medium box)" },
+            { id: "size_large", title: "Large (heavy/bulky)" }
+          ]);
+        } else {
+          session.step = "awaiting_payment_method";
+          await sessionManager.saveSession(userPhone, session);
+          await sendButtons(userPhone, "Should the rider collect the cost of the item from the customer upon delivery?", [
+            { id: "pay_prepaid", title: "Customer has paid" },
+            { id: "pay_cod", title: "Yes, collect cash" }
+          ]);
+        }
+      } else if (buttonId.startsWith("size_")) {
+        let size = "Small";
+        if (buttonId === "size_medium") size = "Medium";
+        else if (buttonId === "size_large") size = "Large";
+
+        session.draftDelivery.size = size;
+        session.step = "awaiting_payment_method";
+        await sessionManager.saveSession(userPhone, session);
+        await sendButtons(userPhone, "Should the rider collect the cost of the item from the customer upon delivery?", [
+          { id: "pay_prepaid", title: "Customer has paid" },
+          { id: "pay_cod", title: "Yes, collect cash" }
+        ]);
+      } else if (buttonId === "pay_prepaid" || buttonId === "pay_cod") {
+        if (buttonId === "pay_prepaid") {
+          session.draftDelivery.cod = false;
+          session.draftDelivery.codAmount = 0;
+          session.step = "awaiting_confirmation";
+          await sessionManager.saveSession(userPhone, session);
+          await showDeliverySummary(userPhone, session.draftDelivery);
+        } else if (buttonId === "pay_cod") {
+          await sendText(userPhone, "What is the cost of the item to be collected? (Enter only the item price, e.g. 5000. Do not include the delivery fee):");
+          session.step = "awaiting_cod_amount";
+          await sessionManager.saveSession(userPhone, session);
+        }
       } else if (buttonId === "confirm_yes" || buttonId === "confirm_no") {
         await handleConfirmSummary(userPhone, buttonId, session);
+      } else if (buttonId === "btn_main_menu") {
+        await sessionManager.clearSession(userPhone);
+        await handleMenu(userPhone, null, session);
+      } else if (buttonId.startsWith("cancel_del_")) {
+        const deliveryId = buttonId.replace("cancel_del_", "");
+        const updatedDelivery = await db.updateDeliveryStatus(deliveryId, "cancelled");
+
+        if (updatedDelivery) {
+          const cancelMessage = [
+            `✕ Delivery Cancelled`,
+            `• Reference: ${updatedDelivery.tracking_code || updatedDelivery.trackingCode || deliveryId}`,
+            `• Status: The rider has been notified and the order is cancelled.`
+          ].join('\n');
+          await sendText(userPhone, cancelMessage);
+        } else {
+          await sendText(userPhone, "Failed to cancel delivery. Please contact support.");
+        }
       }
       return res.sendStatus(200);
     }
@@ -95,18 +156,125 @@ app.post("/webhook", async (req, res) => {
       session.draftDelivery = { address: userText };
       session.step = "confirm_address_input";
       await sessionManager.saveSession(userPhone, session);
-      
+
       await sendButtons(userPhone, `Address entered:\n${userText}\n\nIs this correct?`, [
         { id: "confirm_address", title: "Confirm Address" },
-        { id: "edit_address",    title: "Edit Address" }
+        { id: "edit_address", title: "Edit Address" }
       ]);
     } else if (session.step === "confirm_address_input") {
       await sendButtons(userPhone, `Please select one of the options to proceed:\n\nAddress entered:\n${session.draftDelivery.address}`, [
         { id: "confirm_address", title: "Confirm Address" },
-        { id: "edit_address",    title: "Edit Address" }
+        { id: "edit_address", title: "Edit Address" }
       ]);
+    } else if (session.step === "awaiting_customer_phone") {
+      const inputPhone = userText.trim();
+      const digitCount = (inputPhone.match(/\d/g) || []).length;
+      if (digitCount < 5) {
+        await sendText(userPhone, "Invalid phone number. Please enter a valid customer phone number (e.g. 08012345678):");
+      } else {
+        session.draftDelivery.customerPhone = inputPhone;
+        session.step = "awaiting_category";
+        await sessionManager.saveSession(userPhone, session);
+        await sendButtons(userPhone, "What is to be delivered?", [
+          { id: "cat_food", title: "Food" },
+          { id: "cat_clothing", title: "Clothing" },
+          { id: "cat_others", title: "Others" }
+        ]);
+      }
+    } else if (session.step === "awaiting_category") {
+      const category = userText.trim();
+      session.draftDelivery.category = category;
+
+      const lowerCat = category.toLowerCase();
+      if (lowerCat !== "food" && lowerCat !== "clothing") {
+        session.step = "awaiting_package_size";
+        await sessionManager.saveSession(userPhone, session);
+        await sendButtons(userPhone, "Please select the size of the delivery:", [
+          { id: "size_small", title: "Small (fits in bag)" },
+          { id: "size_medium", title: "Medium (medium box)" },
+          { id: "size_large", title: "Large (heavy/bulky)" }
+        ]);
+      } else {
+        session.draftDelivery.category = lowerCat === "food" ? "Food" : "Clothing";
+        session.step = "awaiting_payment_method";
+        await sessionManager.saveSession(userPhone, session);
+        await sendButtons(userPhone, "Should the rider collect the cost of the item from the customer upon delivery?", [
+          { id: "pay_prepaid", title: "Customer has paid" },
+          { id: "pay_cod", title: "Yes, collect cash" }
+        ]);
+      }
+    } else if (session.step === "awaiting_package_size") {
+      const text = userText.trim().toLowerCase();
+      let size = "Small";
+      if (text.includes("large") || text.includes("bulky") || text.includes("heavy")) {
+        size = "Large";
+      } else if (text.includes("medium") || text.includes("box")) {
+        size = "Medium";
+      }
+
+      session.draftDelivery.size = size;
+      session.step = "awaiting_payment_method";
+      await sessionManager.saveSession(userPhone, session);
+      await sendButtons(userPhone, "Should the rider collect the cost of the item from the customer upon delivery?", [
+        { id: "pay_prepaid", title: "Customer has paid" },
+        { id: "pay_cod", title: "Yes, collect cash" }
+      ]);
+    } else if (session.step === "awaiting_payment_method") {
+      await sendButtons(userPhone, "Should the rider collect the cost of the item from the customer upon delivery?", [
+        { id: "pay_prepaid", title: "Customer has paid" },
+        { id: "pay_cod", title: "Yes, collect cash" }
+      ]);
+    } else if (session.step === "awaiting_cod_amount") {
+      const parsedAmount = parseInt(userText.replace(/[^0-9]/g, ""), 10);
+      if (isNaN(parsedAmount) || parsedAmount < 0) {
+        await sendText(userPhone, "Invalid amount. Please enter only the numeric price of the item to be collected (e.g. 5000. Do not include the delivery fee):");
+      } else {
+        session.draftDelivery.cod = true;
+        session.draftDelivery.codAmount = parsedAmount;
+        session.step = "awaiting_confirmation";
+        await sessionManager.saveSession(userPhone, session);
+        await showDeliverySummary(userPhone, session.draftDelivery);
+      }
     } else if (session.step === "awaiting_confirmation") {
       await showDeliverySummary(userPhone, session.draftDelivery);
+    } else if (session.step === "awaiting_tracking_code") {
+      const trackingCode = userText.trim().toUpperCase();
+      const delivery = await db.getDeliveryByTrackingCode(trackingCode);
+
+      if (delivery) {
+        let statusEmoji = "🚚";
+        if (delivery.status === "delivered") statusEmoji = "✓";
+        else if (delivery.status === "cancelled") statusEmoji = "✕";
+        else if (delivery.status === "searching") statusEmoji = "🔍";
+
+        const dropoff = delivery.dropoff || delivery.address || "Lagos, Nigeria";
+        const item = delivery.item || delivery.category || "Package";
+        const status = delivery.status || "searching";
+        const customerPhone = delivery.customer_phone || delivery.customerPhone || "Not provided";
+
+        const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dropoff)}`;
+
+        const statusMessage = [
+          `🔍 Order Status found:`,
+          `• Reference: ${trackingCode}`,
+          `• Item: ${item}`,
+          `• Customer Phone: ${customerPhone}`,
+          `• Dropoff: ${dropoff}`,
+          `• Status: ${statusEmoji} ${status.toUpperCase()}`,
+          `• Real-time Tracking: ${trackingLink}`
+        ].join('\n');
+
+        await sendButtons(userPhone, statusMessage, [
+          { id: 'btn_main_menu', title: 'Back to Menu' }
+        ]);
+        await sessionManager.clearSession(userPhone);
+      } else {
+        await sendButtons(userPhone, `✕ Order "${trackingCode}" not found.\n\nPlease check the reference number and try again.`, [
+          { id: 'btn_track', title: 'Try Again 🔍' },
+          { id: 'btn_main_menu', title: 'Back to Menu' }
+        ]);
+        await sessionManager.clearSession(userPhone);
+      }
     } else {
       // Default: show main menu
       await handleMenu(userPhone, null, session);
@@ -179,33 +347,81 @@ async function handleMenu(phone, input, session) {
     return;
   }
 
+  if (input === 'btn_track') {
+    await sendText(phone, "Please enter the Reference Number / Tracking Code of the order (e.g. AK123456):");
+    session.step = 'awaiting_tracking_code';
+    session.draftDelivery = {};
+    await sessionManager.saveSession(phone, session);
+    return;
+  }
+
+  if (input === 'btn_account') {
+    const deliveries = await db.getDeliveriesByVendor(phone);
+    const profileText = [
+      `👤 My Account Details:`,
+      `• Business: ${vendor.name}`,
+      `• Registered Phone: ${phone}`,
+      `\n📦 Recent Deliveries (Last 5):`
+    ];
+
+    if (deliveries.length === 0) {
+      profileText.push("No deliveries created yet.");
+    } else {
+      deliveries.forEach((d, i) => {
+        let statusEmoji = "🚚";
+        if (d.status === "delivered") statusEmoji = "✓";
+        else if (d.status === "cancelled") statusEmoji = "✕";
+        else if (d.status === "searching") statusEmoji = "🔍";
+
+        const dropoff = d.dropoff || d.address || "Lagos, Nigeria";
+        const code = d.tracking_code || d.trackingCode || "N/A";
+        const status = d.status || "searching";
+
+        profileText.push(`${i + 1}. ${code} · ${dropoff} · ${statusEmoji} ${status.toUpperCase()}`);
+      });
+    }
+
+    const message = profileText.join('\n');
+    await sendButtons(phone, message, [
+      { id: 'btn_main_menu', title: 'Back to Menu' }
+    ]);
+    await sessionManager.clearSession(phone);
+    return;
+  }
+
   // Default: show main menu
   const greeting = vendor.name ? `Hi ${vendor.name} 👋` : `Hi!`;
   await sendButtons(phone, `${greeting}\n\nWhat do you need?`, [
     { id: 'btn_new_delivery', title: 'New delivery' },
-    { id: 'btn_track',        title: 'Track order' },
-    { id: 'btn_account',      title: 'My account' }
+    { id: 'btn_track', title: 'Track order' },
+    { id: 'btn_account', title: 'My account' }
   ]);
 }
 
 // User-provided logic: Show delivery summary
 async function showDeliverySummary(phone, d) {
-  const fee = await calculateZoneFee(d.pickupLat, d.pickupLng, d.lat, d.lng);
-  const cod = d.cod ? `\n• COD to collect: ₦${d.codAmount.toLocaleString()}` : '';
+  const fee = await calculateZoneFee(d.pickupLat, d.pickupLng, d.lat, d.lng, d.size);
+  const paymentText = d.cod 
+    ? `Cash on Delivery (₦${d.codAmount.toLocaleString()} to collect)` 
+    : 'Already Paid (Prepaid)';
+
+  const itemLine = d.size 
+    ? `• Item: ${d.category} (Size: ${d.size})` 
+    : `• Item: ${d.category}`;
 
   const summary = [
     '📦 Delivery summary:\n',
-    `• Pickup: ${d.pickupLabel}`,
     `• Drop: ${d.address}`,
-    `• Item: ${d.category} · ${d.valueLabel}`,
-    cod,
+    `• Customer Phone: ${d.customerPhone || 'Not provided'}`,
+    itemLine,
+    `• Payment: ${paymentText}`,
     `• Delivery fee: ₦${fee}`,
     '\nConfirm?'
   ].join('\n');
 
   await sendButtons(phone, summary, [
     { id: 'confirm_yes', title: 'Confirm ✓' },
-    { id: 'confirm_no',  title: 'Cancel' }
+    { id: 'confirm_no', title: 'Cancel' }
   ]);
 }
 
@@ -239,12 +455,45 @@ async function handleConfirmSummary(phone, buttonId, session) {
 
   await sendText(phone, message);
 
+  // Simulate rider assignment after 5 seconds
+  setTimeout(async () => {
+    try {
+      const riders = ["Chinedu", "Tunde", "Abubakar", "Emeka"];
+      const riderName = riders[Math.floor(Math.random() * riders.length)];
+      const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
+      const etaMinutes = Math.floor(3 + Math.random() * 10);
+      const rating = (4.5 + Math.random() * 0.5).toFixed(1);
+      const trips = Math.floor(50 + Math.random() * 200);
+
+      const riderMessage = [
+        `🏍️ Rider assigned!`,
+        `• Name: ${riderName}`,
+        `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
+        `• Phone: ${riderPhone}`,
+        `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
+        `• Status: Heading to your location`
+      ].join('\n');
+
+      await sendButtons(phone, riderMessage, [
+        { id: `cancel_del_${delivery.id}`, title: "Cancel Delivery ✕" }
+      ]);
+    } catch (err) {
+      console.error("Rider simulation error:", err);
+    }
+  }, 5000);
+
   await sessionManager.clearSession(phone);
 }
 
-// Helper: Calculate zone fee
-async function calculateZoneFee(pickupLat, pickupLng, lat, lng) {
-  return 1500;
+// Helper: Calculate zone fee based on distance and package size
+async function calculateZoneFee(pickupLat, pickupLng, lat, lng, size) {
+  let baseFee = 1500;
+  if (size === "Medium") {
+    baseFee = 2500;
+  } else if (size === "Large") {
+    baseFee = 4000;
+  }
+  return baseFee;
 }
 
 // Helper: Generate tracking code
@@ -310,5 +559,5 @@ User message: "${text}"
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log("Aika bot running on port", PORT);
+  console.log("Aika bot running on port", PORT);
 });
