@@ -1,11 +1,9 @@
 const express = require("express");
 const axios = require("axios");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 const db = require("./db");
 const sessionManager = require("./session");
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const ai = require("./ai");
 
 const app = express();
 app.use(express.json());
@@ -82,9 +80,23 @@ app.post("/webhook", async (req, res) => {
         await handleMenu(userPhone, buttonId, session);
       } else if (buttonId === "confirm_address" || buttonId === "edit_address") {
         if (buttonId === "confirm_address") {
-          session.step = "awaiting_customer_phone";
-          await sessionManager.saveSession(userPhone, session);
-          await sendText(userPhone, "Please enter the customer's phone number for the rider to call (e.g. 08012345678):");
+          // If the AI already captured a customer phone, skip straight to category
+          // instead of re-asking for it.
+          const draft = session.draftDelivery || {};
+          const phoneDigits = draft.customerPhone ? (draft.customerPhone.match(/\d/g) || []).length : 0;
+          if (phoneDigits >= 5) {
+            session.step = "awaiting_category";
+            await sessionManager.saveSession(userPhone, session);
+            await sendButtons(userPhone, "What is to be delivered?", [
+              { id: "cat_food", title: "Food" },
+              { id: "cat_clothing", title: "Clothing" },
+              { id: "cat_others", title: "Others" }
+            ]);
+          } else {
+            session.step = "awaiting_customer_phone";
+            await sessionManager.saveSession(userPhone, session);
+            await sendText(userPhone, "Please enter the customer's phone number for the rider to call (e.g. 08012345678):");
+          }
         } else if (buttonId === "edit_address") {
           await sendText(userPhone, "Please enter your customer's delivery address:");
           session.step = "awaiting_address_input";
@@ -314,8 +326,9 @@ app.post("/webhook", async (req, res) => {
         await sessionManager.clearSession(userPhone);
       }
     } else {
-      // Default: show main menu
-      await handleMenu(userPhone, null, session);
+      // Vendor typed free text the button flow doesn't handle. Let the AI try to
+      // understand it before falling back to the menu.
+      await handleSmartMessage(userPhone, userText, session);
     }
 
   } catch (err) {
@@ -453,6 +466,110 @@ async function handleMenu(phone, input, session) {
   ]);
 }
 
+// Look up a tracking code and send its status. Returns true if found.
+async function sendTrackingStatus(phone, trackingCode) {
+  const delivery = await db.getDeliveryByTrackingCode(trackingCode);
+  if (!delivery) {
+    await sendButtons(phone, `✕ Order "${trackingCode}" not found.\n\nPlease check the reference number and try again.`, [
+      { id: 'btn_track', title: 'Try Again 🔍' },
+      { id: 'btn_main_menu', title: 'Back to Menu' }
+    ]);
+    return false;
+  }
+
+  let statusEmoji = "🚚";
+  if (delivery.status === "delivered") statusEmoji = "✓";
+  else if (delivery.status === "cancelled") statusEmoji = "✕";
+  else if (delivery.status === "searching") statusEmoji = "🔍";
+  else if (delivery.status === "in_transit") statusEmoji = "🛵";
+
+  const dropoff = delivery.dropoff || delivery.address || "Lagos, Nigeria";
+  const item = delivery.item || delivery.category || "Package";
+  const status = delivery.status || "searching";
+  const customerPhone = delivery.customer_phone || delivery.customerPhone || "Not provided";
+  const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dropoff)}`;
+
+  const statusMessage = [
+    `🔍 Order Status found:`,
+    `• Reference: ${trackingCode}`,
+    `• Item: ${item}`,
+    `• Customer Phone: ${customerPhone}`,
+    `• Dropoff: ${dropoff}`,
+    `• Status: ${statusEmoji} ${status.toUpperCase()}`,
+    `• Real-time Tracking: ${trackingLink}`
+  ].join('\n');
+
+  await sendButtons(phone, statusMessage, [
+    { id: 'btn_main_menu', title: 'Back to Menu' }
+  ]);
+  return true;
+}
+
+// AI entry point: called when a vendor types free text the button flow doesn't
+// handle. Understands intent and either routes into the guided flow, tracks an
+// order, or answers a question — always falling back to the menu when unsure.
+async function handleSmartMessage(phone, text, session) {
+  const understood = await ai.understandMessage(text);
+
+  if (understood.intent === "create_delivery") {
+    // Pre-fill whatever the AI extracted, then jump into the flow at the first gap.
+    // Only carry over fields that map cleanly onto the guided flow. The item is
+    // left for the Food/Clothing/Others buttons since those drive the fee.
+    session.draftDelivery = {};
+    session.batch = [];
+    if (understood.delivery.address) session.draftDelivery.address = understood.delivery.address;
+    if (understood.delivery.customerPhone) session.draftDelivery.customerPhone = understood.delivery.customerPhone;
+    await advanceDeliveryFlow(phone, session);
+    return;
+  }
+
+  if (understood.intent === "track_order") {
+    if (understood.trackingCode) {
+      await sendTrackingStatus(phone, understood.trackingCode);
+      await sessionManager.clearSession(phone);
+    } else {
+      await sendText(phone, "Please enter the Reference Number / Tracking Code of the order (e.g. AK123456):");
+      session.step = "awaiting_tracking_code";
+      session.draftDelivery = {};
+      await sessionManager.saveSession(phone, session);
+    }
+    return;
+  }
+
+  if ((understood.intent === "question" || understood.intent === "greeting") && understood.answer) {
+    await sendButtons(phone, understood.answer, [
+      { id: 'btn_new_delivery', title: 'New delivery' },
+      { id: 'btn_track', title: 'Track order' },
+      { id: 'btn_account', title: 'My account' }
+    ]);
+    return;
+  }
+
+  // Unknown / no usable answer: fall back to the menu.
+  await handleMenu(phone, null, session);
+}
+
+// Given a draftDelivery pre-filled from free text, ask for the address if we
+// don't have one, otherwise confirm the extracted address. From confirmation the
+// existing button flow takes over (and skips the phone step if one was captured).
+async function advanceDeliveryFlow(phone, session) {
+  const d = session.draftDelivery || {};
+
+  if (!d.address) {
+    session.step = "awaiting_address_input";
+    await sessionManager.saveSession(phone, session);
+    await sendText(phone, "Please enter your customer's delivery address:");
+    return;
+  }
+
+  session.step = "confirm_address_input";
+  await sessionManager.saveSession(phone, session);
+  await sendButtons(phone, `Got it. Address:\n${d.address}\n\nIs this correct?`, [
+    { id: "confirm_address", title: "Confirm Address" },
+    { id: "edit_address", title: "Edit Address" }
+  ]);
+}
+
 // User-provided logic: Show delivery summary
 async function showDeliverySummary(phone, d, session) {
   const fee = await calculateZoneFee(d.pickupLat, d.pickupLng, d.lat, d.lng, d.size);
@@ -465,20 +582,32 @@ async function showDeliverySummary(phone, d, session) {
     : `• Item: ${d.category}`;
 
   // If the vendor has already queued stops, this is an additional one in the batch
-  const batchCount = session && Array.isArray(session.batch) ? session.batch.length : 0;
+  const batch = session && Array.isArray(session.batch) ? session.batch : [];
+  const batchCount = batch.length;
   const header = batchCount > 0
     ? `📦 Delivery summary (delivery ${batchCount + 1}):\n`
     : '📦 Delivery summary:\n';
 
-  const summary = [
+  const summaryLines = [
     header,
     `• Drop: ${d.address}`,
     `• Customer Phone: ${d.customerPhone || 'Not provided'}`,
     itemLine,
     `• Payment: ${paymentText}`,
-    `• Delivery fee: ₦${fee}`,
-    '\nConfirm?'
-  ].join('\n');
+    `• Delivery fee: ₦${fee.toLocaleString()}`
+  ];
+
+  // For a batch, add the combined delivery cost across every queued stop plus this one.
+  if (batchCount > 0) {
+    const queuedFees = await Promise.all(
+      batch.map(stop => calculateZoneFee(stop.pickupLat, stop.pickupLng, stop.lat, stop.lng, stop.size))
+    );
+    const totalFee = queuedFees.reduce((sum, f) => sum + f, 0) + fee;
+    summaryLines.push(`\n• Total delivery cost (${batchCount + 1} deliveries): ₦${totalFee.toLocaleString()}`);
+  }
+
+  summaryLines.push('\nConfirm?');
+  const summary = summaryLines.join('\n');
 
   await sendButtons(phone, summary, [
     { id: 'confirm_yes', title: batchCount > 0 ? 'Confirm all ✓' : 'Confirm ✓' },
@@ -653,38 +782,7 @@ async function sendMessage(to, text) {
   );
 }
 
-// Parse delivery with Gemini API
-async function parseDelivery(text) {
-  const model = genAI.getGenerativeModel({ model: "gemini-3.5-flash" });
-
-  const prompt = `
-You are Aika, a logistics assistant for a delivery company in Nigeria.
-
-Extract delivery information from this message:
-
-Return ONLY valid JSON in this format:
-{
-  "intent": "create_delivery",
-  "pickup": "",
-  "dropoff": "",
-  "item": "",
-  "needs_more_info": true/false
-}
-
-User message: "${text}"
-`;
-
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  const textOutput = response.text();
-
-  console.log("RAW GEMINI OUTPUT:", textOutput);
-
-  // Gemini sometimes wraps JSON in text, so clean it:
-  const cleaned = textOutput.replace(/```json|```/g, "").trim();
-
-  return JSON.parse(cleaned);
-}
+// Delivery parsing and question answering now live in ai.js (understandMessage).
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
