@@ -331,39 +331,54 @@ async function sendText(phone, text) {
 }
 
 // Helper: Send Button Message
+// WhatsApp limits reply button titles to 20 characters; longer titles cause the
+// whole message to be rejected with a 400, which silently stalls the flow.
 async function sendButtons(to, text, buttons) {
-  const formattedButtons = buttons.map(btn => ({
-    type: "reply",
-    reply: {
-      id: btn.id,
-      title: btn.title
+  const formattedButtons = buttons.map(btn => {
+    let title = btn.title;
+    if (title && title.length > 20) {
+      console.warn(`Button title "${title}" exceeds 20 chars; truncating to avoid WhatsApp rejection.`);
+      title = title.slice(0, 20);
     }
-  }));
+    return {
+      type: "reply",
+      reply: {
+        id: btn.id,
+        title: title
+      }
+    };
+  });
 
-  await axios.post(
-    `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
-    {
-      messaging_product: "whatsapp",
-      recipient_type: "individual",
-      to,
-      type: "interactive",
-      interactive: {
-        type: "button",
-        body: {
-          text: text
-        },
-        action: {
-          buttons: formattedButtons
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: {
+            text: text
+          },
+          action: {
+            buttons: formattedButtons
+          }
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
         }
       }
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
-        "Content-Type": "application/json"
-      }
-    }
-  );
+    );
+  } catch (err) {
+    // Surface the actual WhatsApp API error instead of failing silently
+    console.error("sendButtons failed:", err.response?.data || err.message);
+    throw err;
+  }
 }
 
 // User-provided logic: Main menu handler
@@ -467,7 +482,7 @@ async function showDeliverySummary(phone, d, session) {
 
   await sendButtons(phone, summary, [
     { id: 'confirm_yes', title: batchCount > 0 ? 'Confirm all ✓' : 'Confirm ✓' },
-    { id: 'add_stop', title: 'Add another delivery ➕' },
+    { id: 'add_stop', title: 'Add delivery ➕' },
     { id: 'confirm_no', title: 'Cancel' }
   ]);
 }
