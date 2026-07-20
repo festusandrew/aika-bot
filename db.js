@@ -42,6 +42,9 @@ if (process.env.DATABASE_URL) {
           customer_phone VARCHAR,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lat DOUBLE PRECISION;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lng DOUBLE PRECISION;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_updated_at TIMESTAMP;
       `);
       console.log("PostgreSQL database tables initialized successfully.");
     } catch (err) {
@@ -113,7 +116,10 @@ async function createDelivery(delivery) {
     item: delivery.item || delivery.category || "",
     status: delivery.status || "searching",
     tracking_code: delivery.trackingCode || "",
-    customer_phone: delivery.customerPhone || ""
+    customer_phone: delivery.customerPhone || "",
+    rider_lat: null,
+    rider_lng: null,
+    rider_updated_at: null
   };
   memoryDb.deliveries.push(newDelivery);
   return newDelivery;
@@ -264,6 +270,30 @@ async function markPickedUp(deliveryId) {
   return null;
 }
 
+// Record the rider's latest GPS position for a delivery, keyed by tracking code.
+// Returns the updated delivery, or null if no delivery matches the code.
+async function updateRiderLocation(trackingCode, lat, lng) {
+  if (pool) {
+    try {
+      const res = await pool.query(
+        "UPDATE deliveries SET rider_lat = $1, rider_lng = $2, rider_updated_at = NOW() WHERE tracking_code = $3 RETURNING *",
+        [lat, lng, trackingCode]
+      );
+      return res.rows[0] || null;
+    } catch (err) {
+      console.error("DB updateRiderLocation error, falling back to memory:", err);
+    }
+  }
+  const delivery = memoryDb.deliveries.find(d => d.tracking_code === trackingCode);
+  if (delivery) {
+    delivery.rider_lat = lat;
+    delivery.rider_lng = lng;
+    delivery.rider_updated_at = new Date().toISOString();
+    return delivery;
+  }
+  return null;
+}
+
 async function getDeliveryByTrackingCode(trackingCode) {
   if (pool) {
     try {
@@ -306,6 +336,7 @@ module.exports = {
   updateDeliveryStatus,
   cancelDelivery,
   markPickedUp,
+  updateRiderLocation,
   getDeliveryByTrackingCode,
   getDeliveriesByVendor,
   getSession,

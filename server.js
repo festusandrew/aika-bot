@@ -13,6 +13,38 @@ app.get("/", (req, res) => {
   res.send("Aika bot is live 🚀");
 });
 
+// Rider app posts its live GPS here so the tracking link points at the rider.
+// Body: { trackingCode, lat, lng }. If RIDER_API_KEY is set, the rider app must
+// send it as the "x-rider-key" header; if unset, the check is skipped.
+app.post("/rider/location", async (req, res) => {
+  try {
+    if (process.env.RIDER_API_KEY && req.get("x-rider-key") !== process.env.RIDER_API_KEY) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const { trackingCode, lat, lng } = req.body || {};
+    const latNum = Number(lat);
+    const lngNum = Number(lng);
+
+    if (!trackingCode || typeof trackingCode !== "string") {
+      return res.status(400).json({ error: "trackingCode is required" });
+    }
+    if (!Number.isFinite(latNum) || latNum < -90 || latNum > 90 ||
+        !Number.isFinite(lngNum) || lngNum < -180 || lngNum > 180) {
+      return res.status(400).json({ error: "lat/lng must be valid coordinates" });
+    }
+
+    const updated = await db.updateRiderLocation(trackingCode.trim().toUpperCase(), latNum, lngNum);
+    if (!updated) {
+      return res.status(404).json({ error: "delivery not found" });
+    }
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Rider location update error:", err);
+    return res.status(500).json({ error: "internal error" });
+  }
+});
+
 // WhatsApp webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -302,7 +334,7 @@ app.post("/webhook", async (req, res) => {
         const status = delivery.status || "searching";
         const customerPhone = delivery.customer_phone || delivery.customerPhone || "Not provided";
 
-        const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dropoff)}`;
+        const trackingLink = buildTrackingLink(delivery);
 
         const statusMessage = [
           `🔍 Order Status found:`,
@@ -487,7 +519,7 @@ async function sendTrackingStatus(phone, trackingCode) {
   const item = delivery.item || delivery.category || "Package";
   const status = delivery.status || "searching";
   const customerPhone = delivery.customer_phone || delivery.customerPhone || "Not provided";
-  const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dropoff)}`;
+  const trackingLink = buildTrackingLink(delivery);
 
   const statusMessage = [
     `🔍 Order Status found:`,
@@ -650,7 +682,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
   if (created.length > 1) {
     const lines = [`🎉 ${created.length} deliveries created successfully!`, `• Pickup: ${pickup || 'Your business location'}`, ''];
     created.forEach((c, i) => {
-      const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.address)}`;
+      const trackingLink = buildTrackingLink(c.delivery);
       lines.push(`Delivery ${i + 1}: ${c.address}`);
       lines.push(`• Reference Number: ${c.trackingCode}`);
       lines.push(`• Tracking: ${trackingLink}`);
@@ -660,7 +692,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
     message = lines.join('\n');
   } else {
     const c = created[0];
-    const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.address)}`;
+    const trackingLink = buildTrackingLink(c.delivery);
     message = [
       `🎉 Delivery created successfully!`,
       `• Reference Number: ${c.trackingCode}`,
@@ -680,6 +712,15 @@ async function handleConfirmSummary(phone, buttonId, session) {
       const etaMinutes = Math.floor(3 + Math.random() * 10);
       const rating = (4.5 + Math.random() * 0.5).toFixed(1);
       const trips = Math.floor(50 + Math.random() * 200);
+
+      // Stand-in for the real rider app posting to POST /rider/location: seed each
+      // delivery with a starting GPS point near Lagos so the tracking link goes
+      // live. Replace this once a real rider device reports its coordinates.
+      for (const c of created) {
+        const riderLat = 6.5244 + (Math.random() - 0.5) * 0.05;
+        const riderLng = 3.3792 + (Math.random() - 0.5) * 0.05;
+        await db.updateRiderLocation(c.trackingCode, riderLat, riderLng);
+      }
 
       const riderLines = [
         `🏍️ Rider assigned!`,
@@ -757,6 +798,19 @@ async function calculateZoneFee(pickupLat, pickupLng, lat, lng, size) {
 // Helper: Generate tracking code
 function generateTrackingCode() {
   return "AK" + Math.floor(100000 + Math.random() * 900000);
+}
+
+// Build the Google Maps tracking link for a delivery. If the rider has reported a
+// live GPS position, point at it (opens the rider's spot in Maps); otherwise fall
+// back to directions to the drop-off address so tracking always works.
+function buildTrackingLink(delivery) {
+  const lat = delivery && (delivery.rider_lat ?? delivery.riderLat);
+  const lng = delivery && (delivery.rider_lng ?? delivery.riderLng);
+  if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lng))) {
+    return `https://www.google.com/maps?q=${lat},${lng}`;
+  }
+  const dropoff = (delivery && (delivery.dropoff || delivery.address)) || "Lagos, Nigeria";
+  return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(dropoff)}`;
 }
 
 // Helper: Dispatch rider
