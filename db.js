@@ -22,8 +22,10 @@ if (process.env.DATABASE_URL) {
         CREATE TABLE IF NOT EXISTS vendors (
           phone VARCHAR PRIMARY KEY,
           name VARCHAR,
+          location VARCHAR,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        ALTER TABLE vendors ADD COLUMN IF NOT EXISTS location VARCHAR;
         CREATE TABLE IF NOT EXISTS sessions (
           phone VARCHAR PRIMARY KEY,
           session_data JSONB,
@@ -64,19 +66,20 @@ async function getVendor(phone) {
   return memoryDb.vendors[phone] || null;
 }
 
-async function createVendor(phone, name) {
+async function createVendor(phone, name, location = null) {
   if (pool) {
     try {
       const res = await pool.query(
-        "INSERT INTO vendors (phone, name) VALUES ($1, $2) ON CONFLICT (phone) DO UPDATE SET name = $2 RETURNING *",
-        [phone, name]
+        "INSERT INTO vendors (phone, name, location) VALUES ($1, $2, $3) ON CONFLICT (phone) DO UPDATE SET name = $2, location = COALESCE($3, vendors.location) RETURNING *",
+        [phone, name, location]
       );
       return res.rows[0];
     } catch (err) {
       console.error("DB createVendor error, falling back to memory:", err);
     }
   }
-  memoryDb.vendors[phone] = { phone, name };
+  const existing = memoryDb.vendors[phone] || {};
+  memoryDb.vendors[phone] = { phone, name, location: location || existing.location || null };
   return memoryDb.vendors[phone];
 }
 

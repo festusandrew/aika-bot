@@ -48,12 +48,21 @@ app.post("/webhook", async (req, res) => {
     // Onboarding flow
     if (!vendor) {
       if (session.step === "onboarding_name") {
-        // Save business name
-        await db.createVendor(userPhone, userText);
+        // Hold business name in session, then collect location before creating the vendor
+        session.onboardingName = userText;
+        session.step = "onboarding_location";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, "Great! What's your business location? This will be used as the pickup point for your deliveries (e.g. 12 Allen Avenue, Ikeja, Lagos):");
+      } else if (session.step === "onboarding_location") {
+        // Save business name + location
+        const businessName = session.onboardingName || "";
+        const location = userText;
+        await db.createVendor(userPhone, businessName, location);
         const updatedVendor = await db.getVendor(userPhone);
-        const businessName = updatedVendor ? updatedVendor.name : userText;
-        await sendText(userPhone, `Awesome, registered business: ${businessName}! 🎉`);
+        const savedName = updatedVendor ? updatedVendor.name : businessName;
+        await sendText(userPhone, `Awesome, registered business: ${savedName}! 🎉\n\nPickup location: ${location}`);
 
+        delete session.onboardingName;
         session.step = "menu";
         await sessionManager.saveSession(userPhone, session);
         await handleMenu(userPhone, null, session);
@@ -122,12 +131,20 @@ app.post("/webhook", async (req, res) => {
           session.draftDelivery.codAmount = 0;
           session.step = "awaiting_confirmation";
           await sessionManager.saveSession(userPhone, session);
-          await showDeliverySummary(userPhone, session.draftDelivery);
+          await showDeliverySummary(userPhone, session.draftDelivery, session);
         } else if (buttonId === "pay_cod") {
           await sendText(userPhone, "What is the cost of the item to be collected? (Enter only the item price, e.g. 5000. Do not include the delivery fee):");
           session.step = "awaiting_cod_amount";
           await sessionManager.saveSession(userPhone, session);
         }
+      } else if (buttonId === "add_stop") {
+        // Queue the current dropoff and start collecting the next one. Pickup stays the vendor's location.
+        if (!Array.isArray(session.batch)) session.batch = [];
+        session.batch.push(session.draftDelivery);
+        session.draftDelivery = {};
+        session.step = "awaiting_address_input";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, `Stop ${session.batch.length} saved. Please enter the delivery address for the next stop:`);
       } else if (buttonId === "confirm_yes" || buttonId === "confirm_no") {
         await handleConfirmSummary(userPhone, buttonId, session);
       } else if (buttonId === "btn_main_menu") {
@@ -233,10 +250,10 @@ app.post("/webhook", async (req, res) => {
         session.draftDelivery.codAmount = parsedAmount;
         session.step = "awaiting_confirmation";
         await sessionManager.saveSession(userPhone, session);
-        await showDeliverySummary(userPhone, session.draftDelivery);
+        await showDeliverySummary(userPhone, session.draftDelivery, session);
       }
     } else if (session.step === "awaiting_confirmation") {
-      await showDeliverySummary(userPhone, session.draftDelivery);
+      await showDeliverySummary(userPhone, session.draftDelivery, session);
     } else if (session.step === "awaiting_tracking_code") {
       const trackingCode = userText.trim().toUpperCase();
       const delivery = await db.getDeliveryByTrackingCode(trackingCode);
@@ -343,6 +360,7 @@ async function handleMenu(phone, input, session) {
     await sendText(phone, "Please enter your customer's delivery address:");
     session.step = 'awaiting_address_input';
     session.draftDelivery = {};
+    session.batch = [];
     await sessionManager.saveSession(phone, session);
     return;
   }
@@ -399,18 +417,24 @@ async function handleMenu(phone, input, session) {
 }
 
 // User-provided logic: Show delivery summary
-async function showDeliverySummary(phone, d) {
+async function showDeliverySummary(phone, d, session) {
   const fee = await calculateZoneFee(d.pickupLat, d.pickupLng, d.lat, d.lng, d.size);
-  const paymentText = d.cod 
-    ? `Cash on Delivery (₦${d.codAmount.toLocaleString()} to collect)` 
+  const paymentText = d.cod
+    ? `Cash on Delivery (₦${d.codAmount.toLocaleString()} to collect)`
     : 'Already Paid (Prepaid)';
 
-  const itemLine = d.size 
-    ? `• Item: ${d.category} (Size: ${d.size})` 
+  const itemLine = d.size
+    ? `• Item: ${d.category} (Size: ${d.size})`
     : `• Item: ${d.category}`;
 
+  // If the vendor has already queued stops, this is an additional one in the batch
+  const batchCount = session && Array.isArray(session.batch) ? session.batch.length : 0;
+  const header = batchCount > 0
+    ? `📦 Delivery summary (stop ${batchCount + 1}):\n`
+    : '📦 Delivery summary:\n';
+
   const summary = [
-    '📦 Delivery summary:\n',
+    header,
     `• Drop: ${d.address}`,
     `• Customer Phone: ${d.customerPhone || 'Not provided'}`,
     itemLine,
@@ -420,7 +444,8 @@ async function showDeliverySummary(phone, d) {
   ].join('\n');
 
   await sendButtons(phone, summary, [
-    { id: 'confirm_yes', title: 'Confirm ✓' },
+    { id: 'confirm_yes', title: batchCount > 0 ? 'Confirm all ✓' : 'Confirm ✓' },
+    { id: 'add_stop', title: 'Add another stop ➕' },
     { id: 'confirm_no', title: 'Cancel' }
   ]);
 }
@@ -433,50 +458,77 @@ async function handleConfirmSummary(phone, buttonId, session) {
     return;
   }
 
-  const trackingCode = generateTrackingCode();
+  // Use the vendor's registered business location as the pickup point for the rider
+  const vendor = await db.getVendor(phone);
+  const pickup = vendor && vendor.location ? vendor.location : "";
 
-  // Create delivery record
-  const delivery = await db.createDelivery({
-    vendorPhone: phone,
-    ...session.draftDelivery,
-    status: 'searching',
-    trackingCode: trackingCode
-  });
+  // Commit every queued stop plus the one currently on screen. Single-delivery
+  // flows have an empty batch, so this is just an array of one.
+  const stops = [...(Array.isArray(session.batch) ? session.batch : []), session.draftDelivery];
+  const created = [];
 
-  const destinationAddress = session.draftDelivery.address || "Lagos, Nigeria";
-  const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destinationAddress)}`;
+  for (const stop of stops) {
+    const trackingCode = generateTrackingCode();
+    const delivery = await db.createDelivery({
+      vendorPhone: phone,
+      ...stop,
+      pickup: pickup,
+      status: 'searching',
+      trackingCode: trackingCode
+    });
+    created.push({ delivery, trackingCode, address: stop.address || "Lagos, Nigeria" });
+  }
 
-  const message = [
-    `🎉 Delivery created successfully!`,
-    `• Reference Number: ${trackingCode}`,
-    `• Status: Searching for nearby riders... 🚚`,
-    `• Real-time Tracking: ${trackingLink}`
-  ].join('\n');
+  // Confirmation: one line per delivery for a batch, the original single-line block otherwise.
+  let message;
+  if (created.length > 1) {
+    const lines = [`🎉 ${created.length} deliveries created successfully!`, `• Pickup: ${pickup || 'Your business location'}`, ''];
+    created.forEach((c, i) => {
+      const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.address)}`;
+      lines.push(`Stop ${i + 1}: ${c.address}`);
+      lines.push(`• Reference Number: ${c.trackingCode}`);
+      lines.push(`• Tracking: ${trackingLink}`);
+      lines.push('');
+    });
+    lines.push('Status: Searching for nearby riders... 🚚');
+    message = lines.join('\n');
+  } else {
+    const c = created[0];
+    const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.address)}`;
+    message = [
+      `🎉 Delivery created successfully!`,
+      `• Reference Number: ${c.trackingCode}`,
+      `• Status: Searching for nearby riders... 🚚`,
+      `• Real-time Tracking: ${trackingLink}`
+    ].join('\n');
+  }
 
   await sendText(phone, message);
 
-  // Simulate rider assignment after 5 seconds
+  // Simulate rider assignment after 5 seconds — one rider per delivery
   setTimeout(async () => {
     try {
       const riders = ["Chinedu", "Tunde", "Abubakar", "Emeka"];
-      const riderName = riders[Math.floor(Math.random() * riders.length)];
-      const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
-      const etaMinutes = Math.floor(3 + Math.random() * 10);
-      const rating = (4.5 + Math.random() * 0.5).toFixed(1);
-      const trips = Math.floor(50 + Math.random() * 200);
+      for (const c of created) {
+        const riderName = riders[Math.floor(Math.random() * riders.length)];
+        const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
+        const etaMinutes = Math.floor(3 + Math.random() * 10);
+        const rating = (4.5 + Math.random() * 0.5).toFixed(1);
+        const trips = Math.floor(50 + Math.random() * 200);
 
-      const riderMessage = [
-        `🏍️ Rider assigned!`,
-        `• Name: ${riderName}`,
-        `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
-        `• Phone: ${riderPhone}`,
-        `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
-        `• Status: Heading to your location`
-      ].join('\n');
+        const riderMessage = [
+          `🏍️ Rider assigned!` + (created.length > 1 ? ` (${c.trackingCode})` : ''),
+          `• Name: ${riderName}`,
+          `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
+          `• Phone: ${riderPhone}`,
+          `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
+          `• Status: Heading to your location`
+        ].join('\n');
 
-      await sendButtons(phone, riderMessage, [
-        { id: `cancel_del_${delivery.id}`, title: "Cancel Delivery ✕" }
-      ]);
+        await sendButtons(phone, riderMessage, [
+          { id: `cancel_del_${c.delivery.id}`, title: "Cancel Delivery ✕" }
+        ]);
+      }
     } catch (err) {
       console.error("Rider simulation error:", err);
     }
