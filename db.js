@@ -187,6 +187,83 @@ async function updateDeliveryStatus(deliveryId, status) {
   return null;
 }
 
+// Cancel a delivery only while it is still cancellable (status 'searching').
+// Returns { result: 'cancelled' | 'not_cancellable' | 'not_found', delivery }.
+async function cancelDelivery(deliveryId) {
+  if (pool) {
+    try {
+      const numericId = parseInt(deliveryId, 10);
+      // Atomic guarded update: only cancels rows still in 'searching'
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = 'cancelled' WHERE id = $1 AND status = 'searching' RETURNING *",
+          [numericId]
+        );
+        if (res.rows[0]) return { result: 'cancelled', delivery: res.rows[0] };
+      }
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = 'cancelled' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
+        [deliveryId]
+      );
+      if (resTracking.rows[0]) return { result: 'cancelled', delivery: resTracking.rows[0] };
+
+      // Nothing cancelled — figure out whether it exists but is past cancellation, or not found
+      const existing = await pool.query(
+        "SELECT * FROM deliveries WHERE id = $1 OR tracking_code = $2",
+        [isNaN(numericId) ? -1 : numericId, deliveryId]
+      );
+      if (existing.rows[0]) return { result: 'not_cancellable', delivery: existing.rows[0] };
+      return { result: 'not_found', delivery: null };
+    } catch (err) {
+      console.error("DB cancelDelivery error, falling back to memory:", err);
+    }
+  }
+
+  // Fallback in-memory
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
+  if (!delivery) return { result: 'not_found', delivery: null };
+  if (delivery.status !== 'searching') return { result: 'not_cancellable', delivery };
+  delivery.status = 'cancelled';
+  return { result: 'cancelled', delivery };
+}
+
+// Move a delivery from 'searching' to 'in_transit' (rider collected the package).
+// Guarded so it never overrides a cancellation. Returns the updated row or null.
+async function markPickedUp(deliveryId) {
+  if (pool) {
+    try {
+      const numericId = parseInt(deliveryId, 10);
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = 'in_transit' WHERE id = $1 AND status = 'searching' RETURNING *",
+          [numericId]
+        );
+        return res.rows[0] || null;
+      }
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = 'in_transit' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
+        [deliveryId]
+      );
+      return resTracking.rows[0] || null;
+    } catch (err) {
+      console.error("DB markPickedUp error, falling back to memory:", err);
+    }
+  }
+
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
+  if (delivery && delivery.status === 'searching') {
+    delivery.status = 'in_transit';
+    return delivery;
+  }
+  return null;
+}
+
 async function getDeliveryByTrackingCode(trackingCode) {
   if (pool) {
     try {
@@ -227,6 +304,8 @@ module.exports = {
   createVendor,
   createDelivery,
   updateDeliveryStatus,
+  cancelDelivery,
+  markPickedUp,
   getDeliveryByTrackingCode,
   getDeliveriesByVendor,
   getSession,

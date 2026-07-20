@@ -144,26 +144,46 @@ app.post("/webhook", async (req, res) => {
         session.draftDelivery = {};
         session.step = "awaiting_address_input";
         await sessionManager.saveSession(userPhone, session);
-        await sendText(userPhone, `Stop ${session.batch.length} saved. Please enter the delivery address for the next stop:`);
+        await sendText(userPhone, `Delivery ${session.batch.length} saved. Please enter the delivery address for the next one:`);
       } else if (buttonId === "confirm_yes" || buttonId === "confirm_no") {
         await handleConfirmSummary(userPhone, buttonId, session);
       } else if (buttonId === "btn_main_menu") {
         await sessionManager.clearSession(userPhone);
         await handleMenu(userPhone, null, session);
       } else if (buttonId.startsWith("cancel_del_")) {
-        const deliveryId = buttonId.replace("cancel_del_", "");
-        const updatedDelivery = await db.updateDeliveryStatus(deliveryId, "cancelled");
+        // May be a single id or a comma-separated batch handled by one rider
+        const deliveryIds = buttonId.replace("cancel_del_", "").split(",").filter(Boolean);
+        const cancelledRefs = [];
+        const blockedRefs = [];
 
-        if (updatedDelivery) {
-          const cancelMessage = [
-            `✕ Delivery Cancelled`,
-            `• Reference: ${updatedDelivery.tracking_code || updatedDelivery.trackingCode || deliveryId}`,
-            `• Status: The rider has been notified and the order is cancelled.`
-          ].join('\n');
-          await sendText(userPhone, cancelMessage);
-        } else {
-          await sendText(userPhone, "Failed to cancel delivery. Please contact support.");
+        for (const deliveryId of deliveryIds) {
+          const { result, delivery } = await db.cancelDelivery(deliveryId);
+          const ref = delivery
+            ? (delivery.tracking_code || delivery.trackingCode || deliveryId)
+            : deliveryId;
+          if (result === 'cancelled') {
+            cancelledRefs.push(ref);
+          } else if (result === 'not_cancellable') {
+            blockedRefs.push(ref);
+          }
         }
+
+        const lines = [];
+        if (cancelledRefs.length > 0) {
+          lines.push(cancelledRefs.length > 1 ? `✕ ${cancelledRefs.length} Deliveries Cancelled` : `✕ Delivery Cancelled`);
+          lines.push(`• Reference: ${cancelledRefs.join(", ")}`);
+          lines.push(`• Status: The rider has been notified and the order is cancelled.`);
+        }
+        if (blockedRefs.length > 0) {
+          if (lines.length > 0) lines.push('');
+          lines.push(blockedRefs.length > 1 ? `⚠️ Could not cancel ${blockedRefs.length} deliveries` : `⚠️ Could not cancel this delivery`);
+          lines.push(`• Reference: ${blockedRefs.join(", ")}`);
+          lines.push(`• The rider has already picked up and is on the way to the drop-off, so it can no longer be cancelled.`);
+        }
+        if (lines.length === 0) {
+          lines.push("Failed to cancel delivery. Please contact support.");
+        }
+        await sendText(userPhone, lines.join('\n'));
       }
       return res.sendStatus(200);
     }
@@ -263,6 +283,7 @@ app.post("/webhook", async (req, res) => {
         if (delivery.status === "delivered") statusEmoji = "✓";
         else if (delivery.status === "cancelled") statusEmoji = "✕";
         else if (delivery.status === "searching") statusEmoji = "🔍";
+        else if (delivery.status === "in_transit") statusEmoji = "🛵";
 
         const dropoff = delivery.dropoff || delivery.address || "Lagos, Nigeria";
         const item = delivery.item || delivery.category || "Package";
@@ -390,6 +411,7 @@ async function handleMenu(phone, input, session) {
         if (d.status === "delivered") statusEmoji = "✓";
         else if (d.status === "cancelled") statusEmoji = "✕";
         else if (d.status === "searching") statusEmoji = "🔍";
+        else if (d.status === "in_transit") statusEmoji = "🛵";
 
         const dropoff = d.dropoff || d.address || "Lagos, Nigeria";
         const code = d.tracking_code || d.trackingCode || "N/A";
@@ -430,7 +452,7 @@ async function showDeliverySummary(phone, d, session) {
   // If the vendor has already queued stops, this is an additional one in the batch
   const batchCount = session && Array.isArray(session.batch) ? session.batch.length : 0;
   const header = batchCount > 0
-    ? `📦 Delivery summary (stop ${batchCount + 1}):\n`
+    ? `📦 Delivery summary (delivery ${batchCount + 1}):\n`
     : '📦 Delivery summary:\n';
 
   const summary = [
@@ -445,7 +467,7 @@ async function showDeliverySummary(phone, d, session) {
 
   await sendButtons(phone, summary, [
     { id: 'confirm_yes', title: batchCount > 0 ? 'Confirm all ✓' : 'Confirm ✓' },
-    { id: 'add_stop', title: 'Add another stop ➕' },
+    { id: 'add_stop', title: 'Add another delivery ➕' },
     { id: 'confirm_no', title: 'Cancel' }
   ]);
 }
@@ -485,7 +507,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
     const lines = [`🎉 ${created.length} deliveries created successfully!`, `• Pickup: ${pickup || 'Your business location'}`, ''];
     created.forEach((c, i) => {
       const trackingLink = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(c.address)}`;
-      lines.push(`Stop ${i + 1}: ${c.address}`);
+      lines.push(`Delivery ${i + 1}: ${c.address}`);
       lines.push(`• Reference Number: ${c.trackingCode}`);
       lines.push(`• Tracking: ${trackingLink}`);
       lines.push('');
@@ -505,34 +527,74 @@ async function handleConfirmSummary(phone, buttonId, session) {
 
   await sendText(phone, message);
 
-  // Simulate rider assignment after 5 seconds — one rider per delivery
+  // Simulate rider assignment after 5 seconds — one rider picks up the whole batch at once
   setTimeout(async () => {
     try {
       const riders = ["Chinedu", "Tunde", "Abubakar", "Emeka"];
-      for (const c of created) {
-        const riderName = riders[Math.floor(Math.random() * riders.length)];
-        const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
-        const etaMinutes = Math.floor(3 + Math.random() * 10);
-        const rating = (4.5 + Math.random() * 0.5).toFixed(1);
-        const trips = Math.floor(50 + Math.random() * 200);
+      const riderName = riders[Math.floor(Math.random() * riders.length)];
+      const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
+      const etaMinutes = Math.floor(3 + Math.random() * 10);
+      const rating = (4.5 + Math.random() * 0.5).toFixed(1);
+      const trips = Math.floor(50 + Math.random() * 200);
 
-        const riderMessage = [
-          `🏍️ Rider assigned!` + (created.length > 1 ? ` (${c.trackingCode})` : ''),
-          `• Name: ${riderName}`,
-          `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
-          `• Phone: ${riderPhone}`,
-          `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
-          `• Status: Heading to your location`
-        ].join('\n');
+      const riderLines = [
+        `🏍️ Rider assigned!`,
+        `• Name: ${riderName}`,
+        `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
+        `• Phone: ${riderPhone}`,
+        `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
+        `• Status: Heading to your location`
+      ];
 
-        await sendButtons(phone, riderMessage, [
-          { id: `cancel_del_${c.delivery.id}`, title: "Cancel Delivery ✕" }
-        ]);
+      if (created.length > 1) {
+        riderLines.push(`\nOne rider is handling all ${created.length} deliveries:`);
+        created.forEach((c, i) => {
+          riderLines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
+        });
       }
+
+      // Cancel action covers every delivery in the batch (comma-separated ids)
+      const cancelId = created.map(c => c.delivery.id).join(",");
+      const cancelTitle = created.length > 1 ? "Cancel All ✕" : "Cancel Delivery ✕";
+
+      await sendButtons(phone, riderLines.join('\n'), [
+        { id: `cancel_del_${cancelId}`, title: cancelTitle }
+      ]);
     } catch (err) {
       console.error("Rider simulation error:", err);
     }
   }, 5000);
+
+  // Simulate the rider reaching pickup and collecting the package. Once picked up
+  // and heading to the drop-off, the order can no longer be cancelled — so we move
+  // it to 'in_transit' and send a follow-up with no cancel button.
+  setTimeout(async () => {
+    try {
+      const pickedUp = [];
+      for (const c of created) {
+        const updated = await db.markPickedUp(c.delivery.id);
+        // Only announce deliveries that were still active (skips any the vendor cancelled in time)
+        if (updated) pickedUp.push(c);
+      }
+      if (pickedUp.length === 0) return;
+
+      const lines = [
+        pickedUp.length > 1
+          ? `📦 Your ${pickedUp.length} deliveries have been picked up!`
+          : `📦 Your delivery has been picked up!`,
+        `• Status: Rider is on the way to the drop-off 🛵`,
+        `• This order can no longer be cancelled.`
+      ];
+      if (pickedUp.length > 1) {
+        pickedUp.forEach((c, i) => {
+          lines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
+        });
+      }
+      await sendText(phone, lines.join('\n'));
+    } catch (err) {
+      console.error("Pickup simulation error:", err);
+    }
+  }, 20000);
 
   await sessionManager.clearSession(phone);
 }
