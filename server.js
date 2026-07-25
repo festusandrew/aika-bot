@@ -466,6 +466,20 @@ async function sendButtons(to, text, buttons) {
 
 // Helper: Send Interactive List Message (WhatsApp List options)
 async function sendList(to, text, buttonTitle, sections) {
+  let safeButtonTitle = buttonTitle || "Select Option";
+  if (safeButtonTitle.length > 20) {
+    safeButtonTitle = safeButtonTitle.slice(0, 20);
+  }
+
+  const formattedSections = sections.map(sec => ({
+    title: sec.title && sec.title.length > 24 ? sec.title.slice(0, 24) : (sec.title || "Options"),
+    rows: (sec.rows || []).map(r => ({
+      id: r.id,
+      title: r.title && r.title.length > 24 ? r.title.slice(0, 24) : r.title,
+      ...(r.description ? { description: r.description.length > 72 ? r.description.slice(0, 72) : r.description } : {})
+    }))
+  }));
+
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -478,8 +492,8 @@ async function sendList(to, text, buttonTitle, sections) {
           type: "list",
           body: { text: text },
           action: {
-            button: buttonTitle,
-            sections: sections
+            button: safeButtonTitle,
+            sections: formattedSections
           }
         }
       },
@@ -492,7 +506,13 @@ async function sendList(to, text, buttonTitle, sections) {
     );
   } catch (err) {
     console.error("sendList failed:", err.response?.data || err.message);
-    throw err;
+    try {
+      const allRows = sections.flatMap(s => s.rows || []);
+      const topButtons = allRows.slice(0, 3).map(r => ({ id: r.id, title: r.title }));
+      await sendButtons(to, text, topButtons);
+    } catch (fallbackErr) {
+      console.error("sendList fallback failed:", fallbackErr.message);
+    }
   }
 }
 
@@ -777,7 +797,7 @@ async function handleRiderStatusUpdate(trackingCode, status, reason = "") {
         "Rate Rider ⭐",
         [
           {
-            title: "Select Rating (1-5 Stars)",
+            title: "Rate Your Rider",
             rows: [
               { id: `rate_5_${safeBatchRef}`, title: "5 Stars ⭐⭐⭐⭐⭐", description: "Excellent service" },
               { id: `rate_4_${safeBatchRef}`, title: "4 Stars ⭐⭐⭐⭐", description: "Very good service" },
