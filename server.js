@@ -93,8 +93,8 @@ app.post("/webhook", async (req, res) => {
   if (!message) return res.sendStatus(200);
 
   const userPhone = message.from;
-  const userText = message.text?.body || message.interactive?.button_reply?.title || "";
-  const buttonId = message.interactive?.button_reply?.id || null;
+  const userText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
+  const buttonId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || null;
 
   console.log(`User (${userPhone}): text="${userText}" buttonId="${buttonId}"`);
   console.log("Webhook reached successfully");
@@ -464,6 +464,38 @@ async function sendButtons(to, text, buttons) {
   }
 }
 
+// Helper: Send Interactive List Message (WhatsApp List options)
+async function sendList(to, text, buttonTitle, sections) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: text },
+          action: {
+            button: buttonTitle,
+            sections: sections
+          }
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+  } catch (err) {
+    console.error("sendList failed:", err.response?.data || err.message);
+    throw err;
+  }
+}
+
 // User-provided logic: Main menu handler
 async function handleMenu(phone, input, session) {
   const vendor = await db.getVendor(phone);
@@ -739,11 +771,23 @@ async function handleRiderStatusUpdate(trackingCode, status, reason = "") {
         : `🎉 Delivery complete!\n\nPlease rate the rider's service to mark this order finalized:`;
 
       const safeBatchRef = batchId || code;
-      await sendButtons(vendorPhone, ratingMsg, [
-        { id: `rate_5_${safeBatchRef}`, title: "⭐⭐⭐⭐⭐ 5 Stars" },
-        { id: `rate_4_${safeBatchRef}`, title: "⭐⭐⭐⭐ 4 Stars" },
-        { id: `rate_3_${safeBatchRef}`, title: "⭐⭐⭐ 3 Stars" }
-      ]);
+      await sendList(
+        vendorPhone,
+        ratingMsg,
+        "Rate Rider ⭐",
+        [
+          {
+            title: "Select Rating (1-5 Stars)",
+            rows: [
+              { id: `rate_5_${safeBatchRef}`, title: "5 Stars ⭐⭐⭐⭐⭐", description: "Excellent service" },
+              { id: `rate_4_${safeBatchRef}`, title: "4 Stars ⭐⭐⭐⭐", description: "Very good service" },
+              { id: `rate_3_${safeBatchRef}`, title: "3 Stars ⭐⭐⭐", description: "Average service" },
+              { id: `rate_2_${safeBatchRef}`, title: "2 Stars ⭐⭐", description: "Below average" },
+              { id: `rate_1_${safeBatchRef}`, title: "1 Star ⭐", description: "Poor service" }
+            ]
+          }
+        ]
+      );
     }
   }
 
