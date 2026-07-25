@@ -45,6 +45,34 @@ app.post("/rider/location", async (req, res) => {
   }
 });
 
+// Rider app signals delivery status update (delivered / failed).
+// Body: { trackingCode, status: "delivered" | "failed", reason?: string }
+app.post("/rider/status", async (req, res) => {
+  try {
+    if (process.env.RIDER_API_KEY && req.get("x-rider-key") !== process.env.RIDER_API_KEY) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const { trackingCode, status, reason } = req.body || {};
+    if (!trackingCode || typeof trackingCode !== "string") {
+      return res.status(400).json({ error: "trackingCode is required" });
+    }
+    if (status !== "delivered" && status !== "failed") {
+      return res.status(400).json({ error: "status must be 'delivered' or 'failed'" });
+    }
+
+    const updated = await handleRiderStatusUpdate(trackingCode, status, reason);
+    if (!updated) {
+      return res.status(404).json({ error: "delivery not found" });
+    }
+
+    return res.status(200).json({ ok: true, status: updated.status });
+  } catch (err) {
+    console.error("Rider status update error:", err);
+    return res.status(500).json({ error: "internal error" });
+  }
+});
+
 // WhatsApp webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -228,6 +256,16 @@ app.post("/webhook", async (req, res) => {
           lines.push("Failed to cancel delivery. Please contact support.");
         }
         await sendText(userPhone, lines.join('\n'));
+      } else if (buttonId.startsWith("rate_")) {
+        // Format: rate_5_BATCH-123456 or rate_5_AK123456
+        const parts = buttonId.split("_");
+        const score = parseInt(parts[1], 10) || 5;
+        const batchRef = parts.slice(2).join("_");
+
+        await db.updateBatchRating(batchRef, score);
+
+        const stars = "⭐".repeat(score);
+        await sendText(userPhone, `Thank you for your rating! ${stars} (${score}/5) saved for the rider.\n\nYour order is now fully finalized! Send "hi" anytime to create a new delivery.`);
       }
       return res.sendStatus(200);
     }
@@ -648,6 +686,70 @@ async function showDeliverySummary(phone, d, session) {
   ]);
 }
 
+// Process status updates from the Rider App (delivered/failed) and alert vendor
+async function handleRiderStatusUpdate(trackingCode, status, reason = "") {
+  const code = trackingCode.trim().toUpperCase();
+  const delivery = await db.getDeliveryByTrackingCode(code);
+  if (!delivery) return null;
+
+  const updatedDelivery = await db.updateDeliveryStatus(code, status);
+  const vendorPhone = delivery.vendor_phone || delivery.vendorPhone;
+  const batchId = delivery.batch_id || delivery.batchId;
+
+  let batchDeliveries = [];
+  if (batchId) {
+    batchDeliveries = await db.getDeliveriesByBatchId(batchId);
+  }
+  if (!batchDeliveries || batchDeliveries.length === 0) {
+    batchDeliveries = [updatedDelivery];
+  }
+
+  const totalCount = batchDeliveries.length;
+  const completedDeliveries = batchDeliveries.filter(
+    d => d.status === "delivered" || d.status === "failed"
+  );
+  const completedCount = completedDeliveries.length;
+  const index = batchDeliveries.findIndex(d => (d.tracking_code || d.trackingCode) === code) + 1;
+  const itemDesc = delivery.item || delivery.category || "Package";
+  const dropoff = delivery.dropoff || delivery.address || "Dropoff location";
+
+  if (vendorPhone) {
+    const isSuccess = status === "delivered";
+    const statusEmoji = isSuccess ? "✅" : "❌";
+    const resultText = isSuccess ? "Successful" : `Failed (${reason || "Customer unreachable"})`;
+
+    const lines = [
+      `${statusEmoji} Delivery Update: ${isSuccess ? "Delivered Successfully!" : "Delivery Failed"}`,
+      `• Reference: ${code}`,
+      `• Item: ${itemDesc}`,
+      `• Dropoff: ${dropoff}`,
+      `• Outcome: ${resultText}`
+    ];
+
+    if (totalCount > 1) {
+      lines.push(`\nProgress: Delivery ${index > 0 ? index : completedCount} of ${totalCount} completed (${completedCount}/${totalCount} finished)`);
+    }
+
+    await sendText(vendorPhone, lines.join("\n"));
+
+    // When the LAST delivery in the batch is marked complete by the rider:
+    if (completedCount === totalCount) {
+      const ratingMsg = totalCount > 1
+        ? `🎉 All ${totalCount} deliveries in this order are now complete!\n\nPlease rate the rider's service to mark this order finalized:`
+        : `🎉 Delivery complete!\n\nPlease rate the rider's service to mark this order finalized:`;
+
+      const safeBatchRef = batchId || code;
+      await sendButtons(vendorPhone, ratingMsg, [
+        { id: `rate_5_${safeBatchRef}`, title: "⭐⭐⭐⭐⭐ 5 Stars" },
+        { id: `rate_4_${safeBatchRef}`, title: "⭐⭐⭐⭐ 4 Stars" },
+        { id: `rate_3_${safeBatchRef}`, title: "⭐⭐⭐ 3 Stars" }
+      ]);
+    }
+  }
+
+  return updatedDelivery;
+}
+
 // User-provided logic: Handle confirmation of summary
 async function handleConfirmSummary(phone, buttonId, session) {
   if (buttonId === 'confirm_no') {
@@ -664,6 +766,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
   // flows have an empty batch, so this is just an array of one.
   const stops = [...(Array.isArray(session.batch) ? session.batch : []), session.draftDelivery];
   const created = [];
+  const batchId = "BATCH-" + Math.floor(100000 + Math.random() * 900000);
 
   for (const stop of stops) {
     const trackingCode = generateTrackingCode();
@@ -672,7 +775,8 @@ async function handleConfirmSummary(phone, buttonId, session) {
       ...stop,
       pickup: pickup,
       status: 'searching',
-      trackingCode: trackingCode
+      trackingCode: trackingCode,
+      batchId: batchId
     });
     created.push({ delivery, trackingCode, address: stop.address || "Lagos, Nigeria" });
   }
@@ -776,6 +880,17 @@ async function handleConfirmSummary(phone, buttonId, session) {
         });
       }
       await sendText(phone, lines.join('\n'));
+
+      // Simulate rider completing drop-offs sequentially one by one
+      pickedUp.forEach((c, idx) => {
+        setTimeout(async () => {
+          try {
+            await handleRiderStatusUpdate(c.trackingCode, "delivered");
+          } catch (err) {
+            console.error("Simulated delivery completion error:", err);
+          }
+        }, (idx + 1) * 15000);
+      });
     } catch (err) {
       console.error("Pickup simulation error:", err);
     }

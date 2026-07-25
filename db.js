@@ -23,6 +23,8 @@ const deliverySchema = new mongoose.Schema({
   status: { type: String, default: "searching" },
   tracking_code: { type: String, index: true },
   customer_phone: { type: String, default: "" },
+  batch_id: { type: String, index: true, default: null },
+  rating: { type: Number, default: null },
   rider_lat: { type: Number, default: null },
   rider_lng: { type: Number, default: null },
   rider_updated_at: { type: Date, default: null },
@@ -101,7 +103,8 @@ async function createDelivery(delivery) {
         item: delivery.item || delivery.category || "",
         status: delivery.status || "searching",
         tracking_code: delivery.trackingCode || "",
-        customer_phone: delivery.customerPhone || ""
+        customer_phone: delivery.customerPhone || "",
+        batch_id: delivery.batchId || null
       });
       return newDoc.toObject();
     } catch (err) {
@@ -118,12 +121,41 @@ async function createDelivery(delivery) {
     status: delivery.status || "searching",
     tracking_code: delivery.trackingCode || "",
     customer_phone: delivery.customerPhone || "",
+    batch_id: delivery.batchId || null,
+    rating: null,
     rider_lat: null,
     rider_lng: null,
     rider_updated_at: null
   };
   memoryDb.deliveries.push(newDelivery);
   return newDelivery;
+}
+
+async function getDeliveriesByBatchId(batchId) {
+  if (!batchId) return [];
+  if (isConnected) {
+    try {
+      return await Delivery.find({ batch_id: batchId }).lean();
+    } catch (err) {
+      console.error("MongoDB getDeliveriesByBatchId error, falling back to memory:", err.message);
+    }
+  }
+  return memoryDb.deliveries.filter(d => d.batch_id === batchId);
+}
+
+async function updateBatchRating(batchId, rating) {
+  if (!batchId) return;
+  if (isConnected) {
+    try {
+      await Delivery.updateMany({ batch_id: batchId }, { $set: { rating: Number(rating) } });
+      return;
+    } catch (err) {
+      console.error("MongoDB updateBatchRating error, falling back to memory:", err.message);
+    }
+  }
+  memoryDb.deliveries.forEach(d => {
+    if (d.batch_id === batchId) d.rating = Number(rating);
+  });
 }
 
 async function getSession(phone) {
@@ -319,6 +351,8 @@ module.exports = {
   getVendor,
   createVendor,
   createDelivery,
+  getDeliveriesByBatchId,
+  updateBatchRating,
   updateDeliveryStatus,
   cancelDelivery,
   markPickedUp,
