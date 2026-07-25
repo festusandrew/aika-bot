@@ -78,7 +78,7 @@ async function createVendor(phone, name, location = null) {
       const updated = await Vendor.findOneAndUpdate(
         { phone },
         { $set: { name, ...(location ? { location } : {}) } },
-        { new: true, upsert: true, setDefaultsOnInsert: true }
+        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
       ).lean();
       return updated;
     } catch (err) {
@@ -178,7 +178,7 @@ async function saveSession(phone, sessionData) {
       await Session.findOneAndUpdate(
         { phone },
         { $set: { session_data: sessionData, updated_at: new Date() } },
-        { upsert: true, setDefaultsOnInsert: true }
+        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
       );
       memoryDb.sessions[phone] = sessionData;
       return;
@@ -200,7 +200,7 @@ async function updateDeliveryStatus(deliveryId, status) {
       const updated = await Delivery.findOneAndUpdate(
         query,
         { $set: { status } },
-        { new: true }
+        { returnDocument: 'after' }
       ).lean();
       if (updated) return updated;
     } catch (err) {
@@ -230,7 +230,7 @@ async function cancelDelivery(deliveryId) {
       const cancelled = await Delivery.findOneAndUpdate(
         query,
         { $set: { status: "cancelled" } },
-        { new: true }
+        { returnDocument: 'after' }
       ).lean();
 
       if (cancelled) return { result: 'cancelled', delivery: cancelled };
@@ -269,7 +269,7 @@ async function markPickedUp(deliveryId) {
       const updated = await Delivery.findOneAndUpdate(
         query,
         { $set: { status: "in_transit" } },
-        { new: true }
+        { returnDocument: 'after' }
       ).lean();
       return updated || null;
     } catch (err) {
@@ -294,7 +294,7 @@ async function updateRiderLocation(trackingCode, lat, lng) {
       const updated = await Delivery.findOneAndUpdate(
         { tracking_code: trackingCode },
         { $set: { rider_lat: lat, rider_lng: lng, rider_updated_at: new Date() } },
-        { new: true }
+        { returnDocument: 'after' }
       ).lean();
       return updated || null;
     } catch (err) {
