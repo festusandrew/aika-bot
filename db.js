@@ -1,133 +1,85 @@
-const mongoose = require("mongoose");
+const { Pool } = require("pg");
 
+let pool = null;
 const memoryDb = {
   vendors: {},
   deliveries: [],
   sessions: {}
 };
 
-const VendorSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    location: { type: String, default: "Kaduna North" },
-    category: { type: String, default: "Food & Drinks" },
-    orders: { type: Number, default: 0 },
-    orderValue: { type: String, default: "₦0" },
-    status: { type: String, default: "Active" },
-    phone: { type: String, default: "" },
-    email: { type: String, default: "" },
-    rating: { type: Number, default: 4.8 },
-  },
-  { timestamps: true }
-);
 
-const JobSchema = new mongoose.Schema(
-  {
-    orderNumber: { type: String, required: true, unique: true },
-    trackingCode: { type: String, default: "" },
-    riderId: { type: mongoose.Schema.Types.ObjectId, ref: "Rider", default: null },
-    riderName: { type: String, default: "" },
-    vendorId: { type: mongoose.Schema.Types.ObjectId, ref: "Vendor", default: null },
-    vendorPhone: { type: String, default: "" },
-    vendor: {
-      name: { type: String, default: "WhatsApp Vendor" },
-      address: { type: String, default: "Kaduna" },
-      itemsDescription: { type: String, default: "Package" },
-      fragile: { type: Boolean, default: false },
-    },
-    customer: {
-      name: { type: String, default: "WhatsApp Customer" },
-      address: { type: String, default: "Kaduna" },
-      phone: { type: String, default: "" },
-    },
-    deliveryFee: { type: Number, default: 1500 },
-    codAmount: { type: Number, default: 0 },
-    amountFormatted: { type: String, default: "₦1,500" },
-    category: { type: String, default: "General Delivery" },
-    packageSize: { type: String, default: "Small" },
-    status: {
-      type: String,
-      default: "available",
-    },
-    riderLat: { type: Number, default: null },
-    riderLng: { type: Number, default: null },
-    riderUpdatedAt: { type: Date, default: null },
-    proofPhotoUrl: { type: String, default: "" },
-    issueReason: { type: String, default: "" },
-    acceptedAt: { type: Date },
-    completedAt: { type: Date },
-  },
-  { timestamps: true }
-);
-
-const SessionSchema = new mongoose.Schema(
-  {
-    phone: { type: String, required: true, unique: true },
-    session_data: { type: mongoose.Schema.Types.Mixed },
-  },
-  { timestamps: true }
-);
-
-const Vendor = mongoose.models.Vendor || mongoose.model("Vendor", VendorSchema);
-const Job = mongoose.models.Job || mongoose.model("Job", JobSchema);
-const Session = mongoose.models.Session || mongoose.model("Session", SessionSchema);
-
-let isConnected = false;
-
-const connectDB = async () => {
-  const uri = process.env.MONGO_URI || "mongodb+srv://aika_rider_app:aika_rider_app@cluster0.vlfuyie.mongodb.net/?appName=Cluster0";
-  try {
-    if (mongoose.connection.readyState >= 1) {
-      isConnected = true;
-      return;
+if (process.env.DATABASE_URL) {
+  pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+      rejectUnauthorized: false
     }
-    await mongoose.connect(uri);
-    isConnected = true;
-    console.log("✅ aika-bot connected to MongoDB Atlas successfully");
-  } catch (err) {
-    console.error("⚠️ aika-bot MongoDB connection error, falling back to memory:", err.message);
-    isConnected = false;
-  }
-};
-connectDB();
+  });
+
+  // Self-initialize tables
+  const initDb = async () => {
+    try {
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS vendors (
+          phone VARCHAR PRIMARY KEY,
+          name VARCHAR,
+          location VARCHAR,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        ALTER TABLE vendors ADD COLUMN IF NOT EXISTS location VARCHAR;
+        CREATE TABLE IF NOT EXISTS sessions (
+          phone VARCHAR PRIMARY KEY,
+          session_data JSONB,
+          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS deliveries (
+          id SERIAL PRIMARY KEY,
+          vendor_phone VARCHAR REFERENCES vendors(phone),
+          pickup VARCHAR,
+          dropoff VARCHAR,
+          item VARCHAR,
+          status VARCHAR,
+          tracking_code VARCHAR,
+          customer_phone VARCHAR,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lat DOUBLE PRECISION;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lng DOUBLE PRECISION;
+        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_updated_at TIMESTAMP;
+      `);
+      console.log("PostgreSQL database tables initialized successfully.");
+    } catch (err) {
+      console.error("Failed to initialize PostgreSQL tables, falling back to in-memory:", err);
+      pool = null; // Fallback
+    }
+  };
+  initDb();
+} else {
+  console.log("No DATABASE_URL found. Running with in-memory database.");
+}
 
 async function getVendor(phone) {
   if (isConnected) {
     try {
-      const vendor = await Vendor.findOne({ phone });
-      if (vendor) {
-        return {
-          phone: vendor.phone,
-          name: vendor.name,
-          location: vendor.location,
-          id: vendor._id,
-        };
-      }
-      return null;
+      const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
+      return res.rows[0] || null;
     } catch (err) {
-      console.error("DB getVendor error:", err.message);
+      console.error("DB getVendor error, falling back to memory:", err);
     }
   }
   return memoryDb.vendors[phone] || null;
 }
 
 async function createVendor(phone, name, location = null) {
-  const loc = location || "Kaduna North";
-  if (isConnected) {
+  if (pool) {
     try {
-      const vendor = await Vendor.findOneAndUpdate(
-        { phone },
-        { name, location: loc, status: "Active" },
-        { upsert: true, new: true }
+      const res = await pool.query(
+        "INSERT INTO vendors (phone, name, location) VALUES ($1, $2, $3) ON CONFLICT (phone) DO UPDATE SET name = $2, location = COALESCE($3, vendors.location) RETURNING *",
+        [phone, name, location]
       );
-      return {
-        phone: vendor.phone,
-        name: vendor.name,
-        location: vendor.location,
-        id: vendor._id,
-      };
+      return res.rows[0];
     } catch (err) {
-      console.error("DB createVendor error:", err.message);
+      console.error("DB createVendor error, falling back to memory:", err);
     }
   }
   memoryDb.vendors[phone] = { phone, name, location: loc };
@@ -135,50 +87,24 @@ async function createVendor(phone, name, location = null) {
 }
 
 async function createDelivery(delivery) {
-  const fee = delivery.deliveryFee || 1500;
-  const trackingCode = delivery.trackingCode || `AK${Math.floor(100000 + Math.random() * 900000)}`;
-
-  if (isConnected) {
+  if (pool) {
     try {
-      const vendorObj = await Vendor.findOne({ phone: delivery.vendorPhone });
-      const newJob = await Job.create({
-        orderNumber: trackingCode,
-        trackingCode: trackingCode,
-        vendorId: vendorObj ? vendorObj._id : null,
-        vendorPhone: delivery.vendorPhone,
-        vendor: {
-          name: vendorObj ? vendorObj.name : "WhatsApp Vendor",
-          address: delivery.pickup || (vendorObj ? vendorObj.location : "Kaduna"),
-          itemsDescription: `${delivery.category || "Package"} (${delivery.size || "Small"})`,
-          fragile: false,
-        },
-        customer: {
-          name: "WhatsApp Customer",
-          address: delivery.dropoff || delivery.address || "Kaduna",
-          phone: delivery.customerPhone || "",
-        },
-        deliveryFee: fee,
-        codAmount: delivery.codAmount || 0,
-        amountFormatted: `₦${fee.toLocaleString()}`,
-        category: delivery.category || "General Delivery",
-        packageSize: delivery.size || "Small",
-        status: "available",
-      });
-
-      return {
-        id: newJob._id.toString(),
-        tracking_code: newJob.trackingCode,
-        trackingCode: newJob.trackingCode,
-        vendor_phone: newJob.vendorPhone,
-        pickup: newJob.vendor.address,
-        dropoff: newJob.customer.address,
-        address: newJob.customer.address,
-        customer_phone: newJob.customer.phone,
-        customerPhone: newJob.customer.phone,
-        status: newJob.status,
-      };
+      const res = await pool.query(
+        `INSERT INTO deliveries (vendor_phone, pickup, dropoff, item, status, tracking_code, customer_phone) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
+          delivery.vendorPhone,
+          delivery.pickup || "",
+          delivery.dropoff || delivery.address || "",
+          delivery.item || delivery.category || "",
+          delivery.status || "searching",
+          delivery.trackingCode || "",
+          delivery.customerPhone || ""
+        ]
+      );
+      return res.rows[0];
     } catch (err) {
-      console.error("DB createDelivery error:", err.message);
+      console.error("DB createDelivery error, falling back to memory:", err);
     }
   }
 
@@ -193,7 +119,6 @@ async function createDelivery(delivery) {
     tracking_code: trackingCode,
     trackingCode: trackingCode,
     customer_phone: delivery.customerPhone || "",
-    customerPhone: delivery.customerPhone || "",
     rider_lat: null,
     rider_lng: null,
     rider_updated_at: null,
@@ -202,15 +127,42 @@ async function createDelivery(delivery) {
   return newDelivery;
 }
 
+async function getDeliveriesByBatchId(batchId) {
+  if (!batchId) return [];
+  if (isConnected) {
+    try {
+      return await Delivery.find({ batch_id: batchId }).lean();
+    } catch (err) {
+      console.error("MongoDB getDeliveriesByBatchId error, falling back to memory:", err.message);
+    }
+  }
+  return memoryDb.deliveries.filter(d => d.batch_id === batchId);
+}
+
+async function updateBatchRating(batchId, rating) {
+  if (!batchId) return;
+  if (isConnected) {
+    try {
+      await Delivery.updateMany({ batch_id: batchId }, { $set: { rating: Number(rating) } });
+      return;
+    } catch (err) {
+      console.error("MongoDB updateBatchRating error, falling back to memory:", err.message);
+    }
+  }
+  memoryDb.deliveries.forEach(d => {
+    if (d.batch_id === batchId) d.rating = Number(rating);
+  });
+}
+
 async function getSession(phone) {
   if (isConnected) {
     try {
-      const sess = await Session.findOne({ phone });
-      if (sess && sess.session_data) {
-        return sess.session_data;
+      const res = await pool.query("SELECT session_data FROM sessions WHERE phone = $1", [phone]);
+      if (res.rows[0]) {
+        return res.rows[0].session_data;
       }
     } catch (err) {
-      console.error("DB getSession error:", err.message);
+      console.error("DB getSession error, falling back to memory:", err);
     }
   }
   return memoryDb.sessions[phone] || { step: "menu", draftDelivery: {} };
@@ -219,15 +171,16 @@ async function getSession(phone) {
 async function saveSession(phone, sessionData) {
   if (isConnected) {
     try {
-      await Session.findOneAndUpdate(
-        { phone },
-        { session_data: sessionData },
-        { upsert: true }
+      await pool.query(
+        `INSERT INTO sessions (phone, session_data, updated_at) 
+         VALUES ($1, $2, NOW()) 
+         ON CONFLICT (phone) DO UPDATE SET session_data = $2, updated_at = NOW()`,
+        [phone, sessionData]
       );
       memoryDb.sessions[phone] = sessionData;
       return;
     } catch (err) {
-      console.error("DB saveSession error:", err.message);
+      console.error("DB saveSession error, falling back to memory:", err);
     }
   }
   memoryDb.sessions[phone] = sessionData;
@@ -236,17 +189,32 @@ async function saveSession(phone, sessionData) {
 async function updateDeliveryStatus(deliveryId, status) {
   if (isConnected) {
     try {
-      const job = await Job.findOneAndUpdate(
-        { $or: [{ _id: mongoose.Types.ObjectId.isValid(deliveryId) ? deliveryId : null }, { trackingCode: deliveryId }, { orderNumber: deliveryId }] },
-        { status },
-        { new: true }
+      // Try updating by ID first (if it's an integer)
+      const numericId = parseInt(deliveryId, 10);
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = $1 WHERE id = $2 RETURNING *",
+          [status, numericId]
+        );
+        if (res.rows[0]) return res.rows[0];
+      }
+
+      // Fallback/alternative: update by tracking code
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = $1 WHERE tracking_code = $2 RETURNING *",
+        [status, deliveryId]
       );
-      if (job) return job;
+      return resTracking.rows[0] || null;
     } catch (err) {
-      console.error("DB updateDeliveryStatus error:", err.message);
+      console.error("DB updateDeliveryStatus error, falling back to memory:", err);
     }
   }
-  const delivery = memoryDb.deliveries.find(d => d.id === deliveryId || d.tracking_code === deliveryId);
+
+  // Fallback in-memory
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
   if (delivery) {
     delivery.status = status;
     return delivery;
@@ -257,67 +225,62 @@ async function updateDeliveryStatus(deliveryId, status) {
 async function cancelDelivery(deliveryId) {
   if (isConnected) {
     try {
-      const job = await Job.findOneAndUpdate(
-        {
-          $or: [{ _id: mongoose.Types.ObjectId.isValid(deliveryId) ? deliveryId : null }, { trackingCode: deliveryId }, { orderNumber: deliveryId }],
-          status: { $in: ["available", "searching"] },
-        },
-        { status: "cancelled" },
-        { new: true }
+      const numericId = parseInt(deliveryId, 10);
+      // Atomic guarded update: only cancels rows still in 'searching'
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = 'cancelled' WHERE id = $1 AND status = 'searching' RETURNING *",
+          [numericId]
+        );
+        if (res.rows[0]) return { result: 'cancelled', delivery: res.rows[0] };
+      }
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = 'cancelled' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
+        [deliveryId]
       );
-      if (job) {
-        return {
-          result: "cancelled",
-          delivery: {
-            id: job._id.toString(),
-            tracking_code: job.trackingCode || job.orderNumber,
-            status: job.status,
-          },
-        };
-      }
+      if (resTracking.rows[0]) return { result: 'cancelled', delivery: resTracking.rows[0] };
 
-      const existing = await Job.findOne({
-        $or: [{ _id: mongoose.Types.ObjectId.isValid(deliveryId) ? deliveryId : null }, { trackingCode: deliveryId }, { orderNumber: deliveryId }],
-      });
-      if (existing) {
-        return {
-          result: "not_cancellable",
-          delivery: {
-            id: existing._id.toString(),
-            tracking_code: existing.trackingCode || existing.orderNumber,
-            status: existing.status,
-          },
-        };
-      }
-      return { result: "not_found", delivery: null };
+      // Nothing cancelled — figure out whether it exists but is past cancellation, or not found
+      const existing = await pool.query(
+        "SELECT * FROM deliveries WHERE id = $1 OR tracking_code = $2",
+        [isNaN(numericId) ? -1 : numericId, deliveryId]
+      );
+      if (existing.rows[0]) return { result: 'not_cancellable', delivery: existing.rows[0] };
+      return { result: 'not_found', delivery: null };
     } catch (err) {
-      console.error("DB cancelDelivery error:", err.message);
+      console.error("DB cancelDelivery error, falling back to memory:", err);
     }
   }
 
-  const delivery = memoryDb.deliveries.find(d => d.id === deliveryId || d.tracking_code === deliveryId);
-  if (!delivery) return { result: "not_found", delivery: null };
-  if (delivery.status !== "available" && delivery.status !== "searching") {
-    return { result: "not_cancellable", delivery };
-  }
-  delivery.status = "cancelled";
-  return { result: "cancelled", delivery };
+  // Fallback in-memory
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
+  if (!delivery) return { result: 'not_found', delivery: null };
+  if (delivery.status !== 'searching') return { result: 'not_cancellable', delivery };
+  delivery.status = 'cancelled';
+  return { result: 'cancelled', delivery };
 }
 
 async function markPickedUp(deliveryId) {
   if (isConnected) {
     try {
-      const job = await Job.findOneAndUpdate(
-        {
-          $or: [{ _id: mongoose.Types.ObjectId.isValid(deliveryId) ? deliveryId : null }, { trackingCode: deliveryId }, { orderNumber: deliveryId }],
-          status: { $in: ["available", "accepted", "heading_to_pickup", "at_pickup"] },
-        },
-        { status: "heading_to_dropoff" },
-        { new: true }
+      const numericId = parseInt(deliveryId, 10);
+      if (!isNaN(numericId)) {
+        const res = await pool.query(
+          "UPDATE deliveries SET status = 'in_transit' WHERE id = $1 AND status = 'searching' RETURNING *",
+          [numericId]
+        );
+        return res.rows[0] || null;
+      }
+      const resTracking = await pool.query(
+        "UPDATE deliveries SET status = 'in_transit' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
+        [deliveryId]
       );
-      return job;
+      return resTracking.rows[0] || null;
     } catch (err) {
-      console.error("DB markPickedUp error:", err.message);
+      console.error("DB markPickedUp error, falling back to memory:", err);
     }
   }
   const delivery = memoryDb.deliveries.find(d => d.id === deliveryId || d.tracking_code === deliveryId);
@@ -331,16 +294,16 @@ async function markPickedUp(deliveryId) {
 async function updateRiderLocation(trackingCode, lat, lng) {
   if (isConnected) {
     try {
-      const job = await Job.findOneAndUpdate(
-        { $or: [{ trackingCode }, { orderNumber: trackingCode }] },
-        { riderLat: lat, riderLng: lng, riderUpdatedAt: new Date() },
-        { new: true }
+      const res = await pool.query(
+        "UPDATE deliveries SET rider_lat = $1, rider_lng = $2, rider_updated_at = NOW() WHERE tracking_code = $3 RETURNING *",
+        [lat, lng, trackingCode]
       );
-      return job;
+      return res.rows[0] || null;
     } catch (err) {
-      console.error("DB updateRiderLocation error:", err.message);
+      console.error("DB updateRiderLocation error, falling back to memory:", err);
     }
   }
+
   const delivery = memoryDb.deliveries.find(d => d.tracking_code === trackingCode);
   if (delivery) {
     delivery.rider_lat = lat;
@@ -354,32 +317,10 @@ async function updateRiderLocation(trackingCode, lat, lng) {
 async function getDeliveryByTrackingCode(trackingCode) {
   if (isConnected) {
     try {
-      const job = await Job.findOne({
-        $or: [{ trackingCode }, { orderNumber: trackingCode }],
-      }).populate("riderId");
-
-      if (job) {
-        return {
-          id: job._id.toString(),
-          tracking_code: job.trackingCode || job.orderNumber,
-          trackingCode: job.trackingCode || job.orderNumber,
-          vendor_phone: job.vendorPhone,
-          pickup: job.vendor?.address || "Kaduna",
-          dropoff: job.customer?.address || "Kaduna",
-          address: job.customer?.address || "Kaduna",
-          item: job.category || job.vendor?.itemsDescription || "Package",
-          status: job.status,
-          customer_phone: job.customer?.phone || "",
-          customerPhone: job.customer?.phone || "",
-          rider_lat: job.riderLat,
-          rider_lng: job.riderLng,
-          rider_updated_at: job.riderUpdatedAt,
-          riderName: job.riderName || (job.riderId ? job.riderId.personalDetails?.fullName : ""),
-          riderPhone: job.riderId ? job.riderId.phone : "",
-        };
-      }
+      const res = await pool.query("SELECT * FROM deliveries WHERE tracking_code = $1", [trackingCode]);
+      return res.rows[0] || null;
     } catch (err) {
-      console.error("DB getDeliveryByTrackingCode error:", err.message);
+      console.error("DB getDeliveryByTrackingCode error, falling back to memory:", err);
     }
   }
   return memoryDb.deliveries.find(d => d.tracking_code === trackingCode || d.trackingCode === trackingCode) || null;
@@ -388,17 +329,13 @@ async function getDeliveryByTrackingCode(trackingCode) {
 async function getDeliveriesByVendor(vendorPhone) {
   if (isConnected) {
     try {
-      const jobs = await Job.find({ vendorPhone }).sort({ createdAt: -1 }).limit(5);
-      return jobs.map(j => ({
-        id: j._id.toString(),
-        tracking_code: j.trackingCode || j.orderNumber,
-        trackingCode: j.trackingCode || j.orderNumber,
-        dropoff: j.customer?.address || "Kaduna",
-        address: j.customer?.address || "Kaduna",
-        status: j.status,
-      }));
+      const res = await pool.query(
+        "SELECT * FROM deliveries WHERE vendor_phone = $1 ORDER BY created_at DESC LIMIT 5",
+        [vendorPhone]
+      );
+      return res.rows;
     } catch (err) {
-      console.error("DB getDeliveriesByVendor error:", err.message);
+      console.error("DB getDeliveriesByVendor error, falling back to memory:", err);
     }
   }
   return memoryDb.deliveries
@@ -416,6 +353,8 @@ module.exports = {
   getVendor,
   createVendor,
   createDelivery,
+  getDeliveriesByBatchId,
+  updateBatchRating,
   updateDeliveryStatus,
   cancelDelivery,
   markPickedUp,

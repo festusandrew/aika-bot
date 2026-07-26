@@ -45,6 +45,34 @@ app.post("/rider/location", async (req, res) => {
   }
 });
 
+// Rider app signals delivery status update (delivered / failed).
+// Body: { trackingCode, status: "delivered" | "failed", reason?: string }
+app.post("/rider/status", async (req, res) => {
+  try {
+    if (process.env.RIDER_API_KEY && req.get("x-rider-key") !== process.env.RIDER_API_KEY) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const { trackingCode, status, reason } = req.body || {};
+    if (!trackingCode || typeof trackingCode !== "string") {
+      return res.status(400).json({ error: "trackingCode is required" });
+    }
+    if (status !== "delivered" && status !== "failed") {
+      return res.status(400).json({ error: "status must be 'delivered' or 'failed'" });
+    }
+
+    const updated = await handleRiderStatusUpdate(trackingCode, status, reason);
+    if (!updated) {
+      return res.status(404).json({ error: "delivery not found" });
+    }
+
+    return res.status(200).json({ ok: true, status: updated.status });
+  } catch (err) {
+    console.error("Rider status update error:", err);
+    return res.status(500).json({ error: "internal error" });
+  }
+});
+
 // WhatsApp webhook verification
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
@@ -65,8 +93,8 @@ app.post("/webhook", async (req, res) => {
   if (!message) return res.sendStatus(200);
 
   const userPhone = message.from;
-  const userText = message.text?.body || message.interactive?.button_reply?.title || "";
-  const buttonId = message.interactive?.button_reply?.id || null;
+  const userText = message.text?.body || message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || "";
+  const buttonId = message.interactive?.button_reply?.id || message.interactive?.list_reply?.id || null;
 
   console.log(`User (${userPhone}): text="${userText}" buttonId="${buttonId}"`);
   console.log("Webhook reached successfully");
@@ -227,6 +255,16 @@ app.post("/webhook", async (req, res) => {
           lines.push("Failed to cancel delivery. Please contact support.");
         }
         await sendText(userPhone, lines.join('\n'));
+      } else if (buttonId.startsWith("rate_")) {
+        // Format: rate_5_BATCH-123456 or rate_5_AK123456
+        const parts = buttonId.split("_");
+        const score = parseInt(parts[1], 10) || 5;
+        const batchRef = parts.slice(2).join("_");
+
+        await db.updateBatchRating(batchRef, score);
+
+        const stars = "⭐".repeat(score);
+        await sendText(userPhone, `Thank you for your rating! ${stars} (${score}/5) saved for the rider.\n\nYour order is now fully finalized! Send "hi" anytime to create a new delivery.`);
       }
       return res.sendStatus(200);
     }
@@ -422,6 +460,58 @@ async function sendButtons(to, text, buttons) {
     // Surface the actual WhatsApp API error instead of failing silently
     console.error("sendButtons failed:", err.response?.data || err.message);
     throw err;
+  }
+}
+
+// Helper: Send Interactive List Message (WhatsApp List options)
+async function sendList(to, text, buttonTitle, sections) {
+  let safeButtonTitle = buttonTitle || "Select Option";
+  if (safeButtonTitle.length > 20) {
+    safeButtonTitle = safeButtonTitle.slice(0, 20);
+  }
+
+  const formattedSections = sections.map(sec => ({
+    title: sec.title && sec.title.length > 24 ? sec.title.slice(0, 24) : (sec.title || "Options"),
+    rows: (sec.rows || []).map(r => ({
+      id: r.id,
+      title: r.title && r.title.length > 24 ? r.title.slice(0, 24) : r.title,
+      ...(r.description ? { description: r.description.length > 72 ? r.description.slice(0, 72) : r.description } : {})
+    }))
+  }));
+
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "list",
+          body: { text: text },
+          action: {
+            button: safeButtonTitle,
+            sections: formattedSections
+          }
+        }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+  } catch (err) {
+    console.error("sendList failed:", err.response?.data || err.message);
+    try {
+      const allRows = sections.flatMap(s => s.rows || []);
+      const topButtons = allRows.slice(0, 3).map(r => ({ id: r.id, title: r.title }));
+      await sendButtons(to, text, topButtons);
+    } catch (fallbackErr) {
+      console.error("sendList fallback failed:", fallbackErr.message);
+    }
   }
 }
 
@@ -652,6 +742,82 @@ async function showDeliverySummary(phone, d, session) {
   ]);
 }
 
+// Process status updates from the Rider App (delivered/failed) and alert vendor
+async function handleRiderStatusUpdate(trackingCode, status, reason = "") {
+  const code = trackingCode.trim().toUpperCase();
+  const delivery = await db.getDeliveryByTrackingCode(code);
+  if (!delivery) return null;
+
+  const updatedDelivery = await db.updateDeliveryStatus(code, status);
+  const vendorPhone = delivery.vendor_phone || delivery.vendorPhone;
+  const batchId = delivery.batch_id || delivery.batchId;
+
+  let batchDeliveries = [];
+  if (batchId) {
+    batchDeliveries = await db.getDeliveriesByBatchId(batchId);
+  }
+  if (!batchDeliveries || batchDeliveries.length === 0) {
+    batchDeliveries = [updatedDelivery];
+  }
+
+  const totalCount = batchDeliveries.length;
+  const completedDeliveries = batchDeliveries.filter(
+    d => d.status === "delivered" || d.status === "failed"
+  );
+  const completedCount = completedDeliveries.length;
+  const index = batchDeliveries.findIndex(d => (d.tracking_code || d.trackingCode) === code) + 1;
+  const itemDesc = delivery.item || delivery.category || "Package";
+  const dropoff = delivery.dropoff || delivery.address || "Dropoff location";
+
+  if (vendorPhone) {
+    const isSuccess = status === "delivered";
+    const statusEmoji = isSuccess ? "✅" : "❌";
+    const resultText = isSuccess ? "Successful" : `Failed (${reason || "Customer unreachable"})`;
+
+    const lines = [
+      `${statusEmoji} Delivery Update: ${isSuccess ? "Delivered Successfully!" : "Delivery Failed"}`,
+      `• Reference: ${code}`,
+      `• Item: ${itemDesc}`,
+      `• Dropoff: ${dropoff}`,
+      `• Outcome: ${resultText}`
+    ];
+
+    if (totalCount > 1) {
+      lines.push(`\nProgress: Delivery ${index > 0 ? index : completedCount} of ${totalCount} completed (${completedCount}/${totalCount} finished)`);
+    }
+
+    await sendText(vendorPhone, lines.join("\n"));
+
+    // When the LAST delivery in the batch is marked complete by the rider:
+    if (completedCount === totalCount) {
+      const ratingMsg = totalCount > 1
+        ? `🎉 All ${totalCount} deliveries in this order are now complete!\n\nPlease rate the rider's service to mark this order finalized:`
+        : `🎉 Delivery complete!\n\nPlease rate the rider's service to mark this order finalized:`;
+
+      const safeBatchRef = batchId || code;
+      await sendList(
+        vendorPhone,
+        ratingMsg,
+        "Rate Rider ⭐",
+        [
+          {
+            title: "Rate Your Rider",
+            rows: [
+              { id: `rate_5_${safeBatchRef}`, title: "5 Stars ⭐⭐⭐⭐⭐", description: "Excellent service" },
+              { id: `rate_4_${safeBatchRef}`, title: "4 Stars ⭐⭐⭐⭐", description: "Very good service" },
+              { id: `rate_3_${safeBatchRef}`, title: "3 Stars ⭐⭐⭐", description: "Average service" },
+              { id: `rate_2_${safeBatchRef}`, title: "2 Stars ⭐⭐", description: "Below average" },
+              { id: `rate_1_${safeBatchRef}`, title: "1 Star ⭐", description: "Poor service" }
+            ]
+          }
+        ]
+      );
+    }
+  }
+
+  return updatedDelivery;
+}
+
 // User-provided logic: Handle confirmation of summary
 async function handleConfirmSummary(phone, buttonId, session) {
   if (buttonId === 'confirm_no') {
@@ -668,6 +834,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
   // flows have an empty batch, so this is just an array of one.
   const stops = [...(Array.isArray(session.batch) ? session.batch : []), session.draftDelivery];
   const created = [];
+  const batchId = "BATCH-" + Math.floor(100000 + Math.random() * 900000);
 
   for (const stop of stops) {
     const trackingCode = generateTrackingCode();
@@ -676,7 +843,8 @@ async function handleConfirmSummary(phone, buttonId, session) {
       ...stop,
       pickup: pickup,
       status: 'searching',
-      trackingCode: trackingCode
+      trackingCode: trackingCode,
+      batchId: batchId
     });
     created.push({ delivery, trackingCode, address: stop.address || "Lagos, Nigeria" });
   }
@@ -706,6 +874,85 @@ async function handleConfirmSummary(phone, buttonId, session) {
   }
 
   await sendText(phone, message);
+
+  // Simulate rider assignment after 5 seconds — one rider picks up the whole batch at once
+  setTimeout(async () => {
+    try {
+      const riders = ["Chinedu", "Tunde", "Abubakar", "Emeka"];
+      const riderName = riders[Math.floor(Math.random() * riders.length)];
+      const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
+      const etaMinutes = Math.floor(3 + Math.random() * 10);
+      const rating = (4.5 + Math.random() * 0.5).toFixed(1);
+      const trips = Math.floor(50 + Math.random() * 200);
+
+      // Stand-in for the real rider app posting to POST /rider/location: seed each
+      // delivery with a starting GPS point near Lagos so the tracking link goes
+      // live. Replace this once a real rider device reports its coordinates.
+      for (const c of created) {
+        const riderLat = 6.5244 + (Math.random() - 0.5) * 0.05;
+        const riderLng = 3.3792 + (Math.random() - 0.5) * 0.05;
+        await db.updateRiderLocation(c.trackingCode, riderLat, riderLng);
+      }
+
+      const riderLines = [
+        `🏍️ Rider assigned!`,
+        `• Name: ${riderName}`,
+        `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
+        `• Phone: ${riderPhone}`,
+        `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
+        `• Status: Heading to your location`
+      ];
+
+      if (created.length > 1) {
+        riderLines.push(`\nOne rider is handling all ${created.length} deliveries:`);
+        created.forEach((c, i) => {
+          riderLines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
+        });
+      }
+
+      // Cancel action covers every delivery in the batch (comma-separated ids)
+      const cancelId = created.map(c => c.delivery.id).join(",");
+      const cancelTitle = created.length > 1 ? "Cancel All ✕" : "Cancel Delivery ✕";
+
+      await sendButtons(phone, riderLines.join('\n'), [
+        { id: `cancel_del_${cancelId}`, title: cancelTitle }
+      ]);
+    } catch (err) {
+      console.error("Rider simulation error:", err);
+    }
+  }, 5000);
+
+  // Simulate the rider reaching pickup and collecting the package. Once picked up
+  // and heading to the drop-off, the order can no longer be cancelled — so we move
+  // it to 'in_transit' and send a follow-up with no cancel button.
+  setTimeout(async () => {
+    try {
+      const pickedUp = [];
+      for (const c of created) {
+        const updated = await db.markPickedUp(c.delivery.id);
+        // Only announce deliveries that were still active (skips any the vendor cancelled in time)
+        if (updated) pickedUp.push(c);
+      }
+      if (pickedUp.length === 0) return;
+
+      const lines = [
+        pickedUp.length > 1
+          ? `📦 Your ${pickedUp.length} deliveries have been picked up!`
+          : `📦 Your delivery has been picked up!`,
+        `• Status: Rider is on the way to the drop-off 🛵`,
+        `• This order can no longer be cancelled.`
+      ];
+      if (pickedUp.length > 1) {
+        pickedUp.forEach((c, i) => {
+          lines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
+        });
+      }
+      await sendText(phone, lines.join('\n'));
+    } catch (err) {
+      console.error("Pickup simulation error:", err);
+    }
+  }, 20000);
+
   await sessionManager.clearSession(phone);
 }
 
