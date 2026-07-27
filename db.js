@@ -1,61 +1,63 @@
-const { Pool } = require("pg");
+const mongoose = require("mongoose");
 
-let pool = null;
+// Mongoose Schemas
+const vendorSchema = new mongoose.Schema({
+  phone: { type: String, required: true, unique: true, index: true },
+  name: { type: String },
+  location: { type: String, default: null },
+  created_at: { type: Date, default: Date.now }
+});
+
+const sessionSchema = new mongoose.Schema({
+  phone: { type: String, required: true, unique: true, index: true },
+  session_data: { type: mongoose.Schema.Types.Mixed, default: { step: 'menu', draftDelivery: {} } },
+  updated_at: { type: Date, default: Date.now }
+});
+
+const deliverySchema = new mongoose.Schema({
+  id: { type: Number },
+  vendor_phone: { type: String, index: true },
+  pickup: { type: String, default: "" },
+  dropoff: { type: String, default: "" },
+  item: { type: String, default: "" },
+  status: { type: String, default: "searching" },
+  tracking_code: { type: String, index: true },
+  customer_phone: { type: String, default: "" },
+  batch_id: { type: String, index: true, default: null },
+  rating: { type: Number, default: null },
+  rider_lat: { type: Number, default: null },
+  rider_lng: { type: Number, default: null },
+  rider_updated_at: { type: Date, default: null },
+  created_at: { type: Date, default: Date.now }
+});
+
+const Vendor = mongoose.model("Vendor", vendorSchema);
+const Session = mongoose.model("Session", sessionSchema);
+const Delivery = mongoose.model("Delivery", deliverySchema);
+
+let isConnected = false;
+
 const memoryDb = {
   vendors: {},
   deliveries: [],
   sessions: {}
 };
 
+const mongoUri = process.env.MONGO_URI || process.env.DATABASE_URL;
 
-if (process.env.DATABASE_URL) {
-  pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-      rejectUnauthorized: false
-    }
-  });
-
-  // Self-initialize tables
-  const initDb = async () => {
-    try {
-      await pool.query(`
-        CREATE TABLE IF NOT EXISTS vendors (
-          phone VARCHAR PRIMARY KEY,
-          name VARCHAR,
-          location VARCHAR,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        ALTER TABLE vendors ADD COLUMN IF NOT EXISTS location VARCHAR;
-        CREATE TABLE IF NOT EXISTS sessions (
-          phone VARCHAR PRIMARY KEY,
-          session_data JSONB,
-          updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS deliveries (
-          id SERIAL PRIMARY KEY,
-          vendor_phone VARCHAR REFERENCES vendors(phone),
-          pickup VARCHAR,
-          dropoff VARCHAR,
-          item VARCHAR,
-          status VARCHAR,
-          tracking_code VARCHAR,
-          customer_phone VARCHAR,
-          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lat DOUBLE PRECISION;
-        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_lng DOUBLE PRECISION;
-        ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS rider_updated_at TIMESTAMP;
-      `);
-      console.log("PostgreSQL database tables initialized successfully.");
-    } catch (err) {
-      console.error("Failed to initialize PostgreSQL tables, falling back to in-memory:", err);
-      pool = null; // Fallback
-    }
-  };
-  initDb();
+if (mongoUri && mongoUri.startsWith("mongodb")) {
+  mongoose
+    .connect(mongoUri)
+    .then(() => {
+      isConnected = true;
+      console.log("Connected to MongoDB successfully via Mongoose.");
+    })
+    .catch((err) => {
+      console.error("MongoDB connection error, falling back to in-memory DB:", err.message);
+      isConnected = false;
+    });
 } else {
-  console.log("No DATABASE_URL found. Running with in-memory database.");
+  console.log("No valid MONGO_URI found. Running with in-memory database.");
 }
 
 const axios = require("axios");
@@ -67,6 +69,7 @@ async function getVendor(phone) {
 
   if (pool) {
     try {
+<<<<<<< HEAD
       const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
       if (res.rows[0]) {
         memoryDb.vendors[phone] = res.rows[0];
@@ -74,6 +77,12 @@ async function getVendor(phone) {
       }
     } catch (err) {
       console.error("DB getVendor error, falling back to backend API:", err.message);
+=======
+      const vendor = await Vendor.findOne({ phone }).lean();
+      return vendor || null;
+    } catch (err) {
+      console.error("MongoDB getVendor error, falling back to memory:", err.message);
+>>>>>>> 5d3ff5218583f67853073d955fbffe0fec1b7e07
     }
   }
 
@@ -99,6 +108,7 @@ async function getVendor(phone) {
   return null;
 }
 
+<<<<<<< HEAD
 
 async function createVendor(phone, name, location = null, extraDetails = {}) {
   const vendorObj = {
@@ -131,47 +141,64 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
     }
   }
   memoryDb.vendors[phone] = vendorObj;
+=======
+async function createVendor(phone, name, location = null) {
+  if (isConnected) {
+    try {
+      const updated = await Vendor.findOneAndUpdate(
+        { phone },
+        { $set: { name, ...(location ? { location } : {}) } },
+        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
+      ).lean();
+      return updated;
+    } catch (err) {
+      console.error("MongoDB createVendor error, falling back to memory:", err.message);
+    }
+  }
+  const existing = memoryDb.vendors[phone] || {};
+  memoryDb.vendors[phone] = { phone, name, location: location || existing.location || null };
+>>>>>>> 5d3ff5218583f67853073d955fbffe0fec1b7e07
   return memoryDb.vendors[phone];
 }
 
 
 
 async function createDelivery(delivery) {
-  if (pool) {
+  if (isConnected) {
     try {
-      const res = await pool.query(
-        `INSERT INTO deliveries (vendor_phone, pickup, dropoff, item, status, tracking_code, customer_phone) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [
-          delivery.vendorPhone,
-          delivery.pickup || "",
-          delivery.dropoff || delivery.address || "",
-          delivery.item || delivery.category || "",
-          delivery.status || "searching",
-          delivery.trackingCode || "",
-          delivery.customerPhone || ""
-        ]
-      );
-      return res.rows[0];
+      const count = await Delivery.countDocuments();
+      const nextId = count + 1;
+      const newDoc = await Delivery.create({
+        id: nextId,
+        vendor_phone: delivery.vendorPhone,
+        pickup: delivery.pickup || "",
+        dropoff: delivery.dropoff || delivery.address || "",
+        item: delivery.item || delivery.category || "",
+        status: delivery.status || "searching",
+        tracking_code: delivery.trackingCode || "",
+        customer_phone: delivery.customerPhone || "",
+        batch_id: delivery.batchId || null
+      });
+      return newDoc.toObject();
     } catch (err) {
-      console.error("DB createDelivery error, falling back to memory:", err);
+      console.error("MongoDB createDelivery error, falling back to memory:", err.message);
     }
   }
 
   const newDelivery = {
-    id: `mem-${memoryDb.deliveries.length + 1}`,
+    id: memoryDb.deliveries.length + 1,
     vendor_phone: delivery.vendorPhone,
     pickup: delivery.pickup || "",
     dropoff: delivery.dropoff || delivery.address || "",
-    address: delivery.dropoff || delivery.address || "",
-    item: delivery.category || "Package",
-    status: "available",
-    tracking_code: trackingCode,
-    trackingCode: trackingCode,
+    item: delivery.item || delivery.category || "",
+    status: delivery.status || "searching",
+    tracking_code: delivery.trackingCode || "",
     customer_phone: delivery.customerPhone || "",
+    batch_id: delivery.batchId || null,
+    rating: null,
     rider_lat: null,
     rider_lng: null,
-    rider_updated_at: null,
+    rider_updated_at: null
   };
   memoryDb.deliveries.push(newDelivery);
   return newDelivery;
@@ -207,30 +234,29 @@ async function updateBatchRating(batchId, rating) {
 async function getSession(phone) {
   if (isConnected) {
     try {
-      const res = await pool.query("SELECT session_data FROM sessions WHERE phone = $1", [phone]);
-      if (res.rows[0]) {
-        return res.rows[0].session_data;
+      const session = await Session.findOne({ phone }).lean();
+      if (session && session.session_data) {
+        return session.session_data;
       }
     } catch (err) {
-      console.error("DB getSession error, falling back to memory:", err);
+      console.error("MongoDB getSession error, falling back to memory:", err.message);
     }
   }
-  return memoryDb.sessions[phone] || { step: "menu", draftDelivery: {} };
+  return memoryDb.sessions[phone] || { step: 'menu', draftDelivery: {} };
 }
 
 async function saveSession(phone, sessionData) {
   if (isConnected) {
     try {
-      await pool.query(
-        `INSERT INTO sessions (phone, session_data, updated_at) 
-         VALUES ($1, $2, NOW()) 
-         ON CONFLICT (phone) DO UPDATE SET session_data = $2, updated_at = NOW()`,
-        [phone, sessionData]
+      await Session.findOneAndUpdate(
+        { phone },
+        { $set: { session_data: sessionData, updated_at: new Date() } },
+        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
       );
       memoryDb.sessions[phone] = sessionData;
       return;
     } catch (err) {
-      console.error("DB saveSession error, falling back to memory:", err);
+      console.error("MongoDB saveSession error, falling back to memory:", err.message);
     }
   }
   memoryDb.sessions[phone] = sessionData;
@@ -239,28 +265,22 @@ async function saveSession(phone, sessionData) {
 async function updateDeliveryStatus(deliveryId, status) {
   if (isConnected) {
     try {
-      // Try updating by ID first (if it's an integer)
       const numericId = parseInt(deliveryId, 10);
-      if (!isNaN(numericId)) {
-        const res = await pool.query(
-          "UPDATE deliveries SET status = $1 WHERE id = $2 RETURNING *",
-          [status, numericId]
-        );
-        if (res.rows[0]) return res.rows[0];
-      }
+      const query = !isNaN(numericId)
+        ? { $or: [{ id: numericId }, { tracking_code: deliveryId }] }
+        : { tracking_code: deliveryId };
 
-      // Fallback/alternative: update by tracking code
-      const resTracking = await pool.query(
-        "UPDATE deliveries SET status = $1 WHERE tracking_code = $2 RETURNING *",
-        [status, deliveryId]
-      );
-      return resTracking.rows[0] || null;
+      const updated = await Delivery.findOneAndUpdate(
+        query,
+        { $set: { status } },
+        { returnDocument: 'after' }
+      ).lean();
+      if (updated) return updated;
     } catch (err) {
-      console.error("DB updateDeliveryStatus error, falling back to memory:", err);
+      console.error("MongoDB updateDeliveryStatus error, falling back to memory:", err.message);
     }
   }
 
-  // Fallback in-memory
   const numericId = parseInt(deliveryId, 10);
   const delivery = memoryDb.deliveries.find(
     d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
@@ -276,33 +296,31 @@ async function cancelDelivery(deliveryId) {
   if (isConnected) {
     try {
       const numericId = parseInt(deliveryId, 10);
-      // Atomic guarded update: only cancels rows still in 'searching'
-      if (!isNaN(numericId)) {
-        const res = await pool.query(
-          "UPDATE deliveries SET status = 'cancelled' WHERE id = $1 AND status = 'searching' RETURNING *",
-          [numericId]
-        );
-        if (res.rows[0]) return { result: 'cancelled', delivery: res.rows[0] };
-      }
-      const resTracking = await pool.query(
-        "UPDATE deliveries SET status = 'cancelled' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
-        [deliveryId]
-      );
-      if (resTracking.rows[0]) return { result: 'cancelled', delivery: resTracking.rows[0] };
+      const query = !isNaN(numericId)
+        ? { $or: [{ id: numericId }, { tracking_code: deliveryId }], status: "searching" }
+        : { tracking_code: deliveryId, status: "searching" };
 
-      // Nothing cancelled — figure out whether it exists but is past cancellation, or not found
-      const existing = await pool.query(
-        "SELECT * FROM deliveries WHERE id = $1 OR tracking_code = $2",
-        [isNaN(numericId) ? -1 : numericId, deliveryId]
-      );
-      if (existing.rows[0]) return { result: 'not_cancellable', delivery: existing.rows[0] };
+      const cancelled = await Delivery.findOneAndUpdate(
+        query,
+        { $set: { status: "cancelled" } },
+        { returnDocument: 'after' }
+      ).lean();
+
+      if (cancelled) return { result: 'cancelled', delivery: cancelled };
+
+      // Determine if delivery exists but wasn't cancellable
+      const existingQuery = !isNaN(numericId)
+        ? { $or: [{ id: numericId }, { tracking_code: deliveryId }] }
+        : { tracking_code: deliveryId };
+      const existing = await Delivery.findOne(existingQuery).lean();
+
+      if (existing) return { result: 'not_cancellable', delivery: existing };
       return { result: 'not_found', delivery: null };
     } catch (err) {
-      console.error("DB cancelDelivery error, falling back to memory:", err);
+      console.error("MongoDB cancelDelivery error, falling back to memory:", err.message);
     }
   }
 
-  // Fallback in-memory
   const numericId = parseInt(deliveryId, 10);
   const delivery = memoryDb.deliveries.find(
     d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
@@ -317,25 +335,27 @@ async function markPickedUp(deliveryId) {
   if (isConnected) {
     try {
       const numericId = parseInt(deliveryId, 10);
-      if (!isNaN(numericId)) {
-        const res = await pool.query(
-          "UPDATE deliveries SET status = 'in_transit' WHERE id = $1 AND status = 'searching' RETURNING *",
-          [numericId]
-        );
-        return res.rows[0] || null;
-      }
-      const resTracking = await pool.query(
-        "UPDATE deliveries SET status = 'in_transit' WHERE tracking_code = $1 AND status = 'searching' RETURNING *",
-        [deliveryId]
-      );
-      return resTracking.rows[0] || null;
+      const query = !isNaN(numericId)
+        ? { $or: [{ id: numericId }, { tracking_code: deliveryId }], status: "searching" }
+        : { tracking_code: deliveryId, status: "searching" };
+
+      const updated = await Delivery.findOneAndUpdate(
+        query,
+        { $set: { status: "in_transit" } },
+        { returnDocument: 'after' }
+      ).lean();
+      return updated || null;
     } catch (err) {
-      console.error("DB markPickedUp error, falling back to memory:", err);
+      console.error("MongoDB markPickedUp error, falling back to memory:", err.message);
     }
   }
-  const delivery = memoryDb.deliveries.find(d => d.id === deliveryId || d.tracking_code === deliveryId);
-  if (delivery) {
-    delivery.status = "in_transit";
+
+  const numericId = parseInt(deliveryId, 10);
+  const delivery = memoryDb.deliveries.find(
+    d => (!isNaN(numericId) && d.id === numericId) || d.tracking_code === deliveryId
+  );
+  if (delivery && delivery.status === 'searching') {
+    delivery.status = 'in_transit';
     return delivery;
   }
   return null;
@@ -344,13 +364,14 @@ async function markPickedUp(deliveryId) {
 async function updateRiderLocation(trackingCode, lat, lng) {
   if (isConnected) {
     try {
-      const res = await pool.query(
-        "UPDATE deliveries SET rider_lat = $1, rider_lng = $2, rider_updated_at = NOW() WHERE tracking_code = $3 RETURNING *",
-        [lat, lng, trackingCode]
-      );
-      return res.rows[0] || null;
+      const updated = await Delivery.findOneAndUpdate(
+        { tracking_code: trackingCode },
+        { $set: { rider_lat: lat, rider_lng: lng, rider_updated_at: new Date() } },
+        { returnDocument: 'after' }
+      ).lean();
+      return updated || null;
     } catch (err) {
-      console.error("DB updateRiderLocation error, falling back to memory:", err);
+      console.error("MongoDB updateRiderLocation error, falling back to memory:", err.message);
     }
   }
 
@@ -367,25 +388,25 @@ async function updateRiderLocation(trackingCode, lat, lng) {
 async function getDeliveryByTrackingCode(trackingCode) {
   if (isConnected) {
     try {
-      const res = await pool.query("SELECT * FROM deliveries WHERE tracking_code = $1", [trackingCode]);
-      return res.rows[0] || null;
+      const delivery = await Delivery.findOne({ tracking_code: trackingCode }).lean();
+      return delivery || null;
     } catch (err) {
-      console.error("DB getDeliveryByTrackingCode error, falling back to memory:", err);
+      console.error("MongoDB getDeliveryByTrackingCode error, falling back to memory:", err.message);
     }
   }
-  return memoryDb.deliveries.find(d => d.tracking_code === trackingCode || d.trackingCode === trackingCode) || null;
+  return memoryDb.deliveries.find(d => d.tracking_code === trackingCode) || null;
 }
 
 async function getDeliveriesByVendor(vendorPhone) {
   if (isConnected) {
     try {
-      const res = await pool.query(
-        "SELECT * FROM deliveries WHERE vendor_phone = $1 ORDER BY created_at DESC LIMIT 5",
-        [vendorPhone]
-      );
-      return res.rows;
+      const deliveries = await Delivery.find({ vendor_phone: vendorPhone })
+        .sort({ created_at: -1 })
+        .limit(5)
+        .lean();
+      return deliveries;
     } catch (err) {
-      console.error("DB getDeliveriesByVendor error, falling back to memory:", err);
+      console.error("MongoDB getDeliveriesByVendor error, falling back to memory:", err.message);
     }
   }
   return memoryDb.deliveries
@@ -395,7 +416,7 @@ async function getDeliveriesByVendor(vendorPhone) {
 }
 
 async function clearSession(phone) {
-  const defaultSession = { step: "menu", draftDelivery: {} };
+  const defaultSession = { step: 'menu', draftDelivery: {} };
   await saveSession(phone, defaultSession);
 }
 
@@ -413,5 +434,5 @@ module.exports = {
   getDeliveriesByVendor,
   getSession,
   saveSession,
-  clearSession,
+  clearSession
 };
