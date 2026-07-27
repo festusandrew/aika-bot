@@ -58,33 +58,83 @@ if (process.env.DATABASE_URL) {
   console.log("No DATABASE_URL found. Running with in-memory database.");
 }
 
+const axios = require("axios");
+
 async function getVendor(phone) {
-  if (isConnected) {
+  if (memoryDb.vendors[phone]) {
+    return memoryDb.vendors[phone];
+  }
+
+  if (pool) {
     try {
       const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
-      return res.rows[0] || null;
+      if (res.rows[0]) {
+        memoryDb.vendors[phone] = res.rows[0];
+        return res.rows[0];
+      }
     } catch (err) {
-      console.error("DB getVendor error, falling back to memory:", err);
+      console.error("DB getVendor error, falling back to backend API:", err.message);
     }
   }
-  return memoryDb.vendors[phone] || null;
+
+  // Fallback: check aika-Backend MongoDB API
+  try {
+    const res = await axios.get(`http://localhost:5000/api/vendors/by-phone/${encodeURIComponent(phone)}`);
+    if (res.data && res.data.vendor) {
+      const v = res.data.vendor;
+      const vendorObj = {
+        phone: v.phone || phone,
+        name: v.name,
+        location: v.location || "Kaduna",
+        category: v.category || "Food & Drinks",
+        email: v.email || "",
+      };
+      memoryDb.vendors[phone] = vendorObj;
+      return vendorObj;
+    }
+  } catch (err) {
+    // Vendor not found in backend DB
+  }
+
+  return null;
 }
 
-async function createVendor(phone, name, location = null) {
+
+async function createVendor(phone, name, location = null, extraDetails = {}) {
+  const vendorObj = {
+    phone,
+    name,
+    location: location || "Kaduna",
+    ownerName: extraDetails.ownerName || "",
+    category: extraDetails.category || "Food & Drinks",
+    email: extraDetails.email || "",
+    status: "Active",
+  };
+
+  // Sync vendor to aika-Backend MongoDB API
+  try {
+    await axios.post("http://localhost:5000/api/vendors", vendorObj);
+    console.log(`Synced vendor "${name}" (${phone}) to aika-Backend MongoDB`);
+  } catch (err) {
+    console.error("Failed to sync vendor to aika-Backend:", err.message);
+  }
+
   if (pool) {
     try {
       const res = await pool.query(
         "INSERT INTO vendors (phone, name, location) VALUES ($1, $2, $3) ON CONFLICT (phone) DO UPDATE SET name = $2, location = COALESCE($3, vendors.location) RETURNING *",
         [phone, name, location]
       );
-      return res.rows[0];
+      return { ...res.rows[0], ...vendorObj };
     } catch (err) {
-      console.error("DB createVendor error, falling back to memory:", err);
+      console.error("DB createVendor error, falling back to memory:", err.message);
     }
   }
-  memoryDb.vendors[phone] = { phone, name, location: loc };
+  memoryDb.vendors[phone] = vendorObj;
   return memoryDb.vendors[phone];
 }
+
+
 
 async function createDelivery(delivery) {
   if (pool) {

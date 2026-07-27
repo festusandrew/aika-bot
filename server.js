@@ -105,33 +105,103 @@ app.post("/webhook", async (req, res) => {
 
     // Onboarding flow
     if (!vendor) {
-      if (session.step === "onboarding_name") {
-        // Hold business name in session, then collect location before creating the vendor
-        session.onboardingName = userText;
-        session.step = "onboarding_location";
-        await sessionManager.saveSession(userPhone, session);
-        await sendText(userPhone, "Great! What's your business location? This will be used as the pickup point for your deliveries (e.g. 12 Allen Avenue, Ikeja, Lagos):");
-      } else if (session.step === "onboarding_location") {
-        // Save business name + location
-        const businessName = session.onboardingName || "";
-        const location = userText;
-        await db.createVendor(userPhone, businessName, location);
-        const updatedVendor = await db.getVendor(userPhone);
-        const savedName = updatedVendor ? updatedVendor.name : businessName;
-        await sendText(userPhone, `Awesome, registered business: ${savedName}! 🎉\n\nPickup location: ${location}`);
+      if (buttonId === "vendor_confirm_yes") {
+        const businessName = session.onboardingName || "Registered Business";
+        const ownerName = session.onboardingOwner || "";
+        const category = session.onboardingCategory || "Food & Drinks";
+        const email = session.onboardingEmail || "";
+        const location = session.onboardingLocation || "Kaduna";
+
+        await db.createVendor(userPhone, businessName, location, { ownerName, category, email });
+        
+        // Sync registered vendor to aika-Backend MongoDB via API
+        try {
+          await axios.post("http://localhost:5000/api/vendors", {
+            name: businessName,
+            phone: userPhone,
+            email: email,
+            location: location,
+            category: category,
+            status: "Active",
+          });
+          console.log(`Synced vendor "${businessName}" to aika-Backend MongoDB`);
+        } catch (err) {
+          console.error("Failed to sync vendor to aika-Backend:", err.message);
+        }
+
+        await sendText(userPhone, `Awesome! Your business "${businessName}" has been registered successfully! 🎉\n\nLocation: ${location}\nCategory: ${category}`);
         delete session.onboardingName;
+        delete session.onboardingOwner;
+        delete session.onboardingCategory;
+        delete session.onboardingEmail;
+        delete session.onboardingLocation;
         session.step = "menu";
         await sessionManager.saveSession(userPhone, session);
         await handleMenu(userPhone, null, session);
+        return res.sendStatus(200);
+      } else if (buttonId === "vendor_confirm_no") {
+        await sendText(userPhone, "Registration reset. What is your Business Name?");
+        session.step = "onboarding_name";
+        await sessionManager.saveSession(userPhone, session);
+        return res.sendStatus(200);
+      }
+
+      if (session.step === "onboarding_name") {
+        session.onboardingName = userText;
+        session.step = "onboarding_owner";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, `Great! What is the Owner or Manager's Name for "${userText}"?`);
+      } else if (session.step === "onboarding_owner") {
+        session.onboardingOwner = userText;
+        session.step = "onboarding_category";
+        await sessionManager.saveSession(userPhone, session);
+        await sendButtons(userPhone, "What category is your business?", [
+          { id: "vcat_food", title: "Food & Drinks" },
+          { id: "vcat_groceries", title: "Groceries" },
+          { id: "vcat_pharmacy", title: "Pharmacy" }
+        ]);
+      } else if (session.step === "onboarding_category" || buttonId?.startsWith("vcat_")) {
+        let category = "Food & Drinks";
+        if (buttonId === "vcat_groceries") category = "Groceries";
+        else if (buttonId === "vcat_pharmacy") category = "Pharmacy";
+        else if (userText) category = userText;
+
+        session.onboardingCategory = category;
+        session.step = "onboarding_email";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, "What is your Business Email Address?");
+      } else if (session.step === "onboarding_email") {
+        session.onboardingEmail = userText;
+        session.step = "onboarding_location";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, "What is your Business Location / Pickup Address? (e.g. Barnawa Shopping Complex, Kaduna):");
+      } else if (session.step === "onboarding_location") {
+        session.onboardingLocation = userText;
+        session.step = "onboarding_confirm";
+        await sessionManager.saveSession(userPhone, session);
+
+        const summaryMsg = [
+          `🏢 Confirm your business details:`,
+          `• Business Name: ${session.onboardingName}`,
+          `• Owner/Manager: ${session.onboardingOwner}`,
+          `• Category: ${session.onboardingCategory}`,
+          `• Email: ${session.onboardingEmail}`,
+          `• Location: ${session.onboardingLocation}`,
+          `• Phone: ${userPhone}`,
+          `\nIs this information correct?`
+        ].join('\n');
+
+        await sendButtons(userPhone, summaryMsg, [
+          { id: "vendor_confirm_yes", title: "Confirm & Save ✅" },
+          { id: "vendor_confirm_no", title: "Re-enter Details ✏️" }
+        ]);
       } else {
-        // Trigger onboarding
-        console.log("Attempting to send onboarding message...");
         await sendText(userPhone, "Hi! Welcome to Aika.\n\nWhat's your business name?");
-        console.log("Onboarding message sent.");
         await sessionManager.saveSession(userPhone, { step: 'onboarding_name' });
       }
       return res.sendStatus(200);
     }
+
 
     // Routing based on button actions
     if (buttonId) {
@@ -846,8 +916,32 @@ async function handleConfirmSummary(phone, buttonId, session) {
       trackingCode: trackingCode,
       batchId: batchId
     });
-    created.push({ delivery, trackingCode, address: stop.address || "Lagos, Nigeria" });
+    created.push({ delivery, trackingCode, address: stop.address || "Kaduna" });
+
+    // Sync delivery job to aika-Backend MongoDB via webhook API
+    try {
+      const fee = await calculateZoneFee(stop.pickupLat, stop.pickupLng, stop.lat, stop.lng, stop.size);
+      await axios.post("http://localhost:5000/api/jobs/create", {
+        orderNumber: trackingCode,
+        trackingCode: trackingCode,
+        vendorName: vendor ? vendor.name : "WhatsApp Vendor",
+        vendorAddress: pickup || "Kaduna",
+        vendorPhone: phone,
+        customerName: "Customer",
+        customerAddress: stop.address || "Kaduna",
+        customerPhone: stop.customerPhone || phone,
+        itemsDescription: stop.category || "Package",
+        category: stop.category || "General",
+        deliveryFee: fee || 1500,
+        codAmount: stop.codAmount || 0,
+        status: "Active"
+      });
+      console.log(`Synced delivery "${trackingCode}" to aika-Backend MongoDB`);
+    } catch (err) {
+      console.error("Failed to sync delivery job to aika-Backend:", err.message);
+    }
   }
+
 
   // Confirmation: one line per delivery for a batch, the original single-line block otherwise.
   let message;
