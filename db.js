@@ -59,7 +59,7 @@ if (process.env.DATABASE_URL) {
 }
 
 async function getVendor(phone) {
-  if (isConnected) {
+  if (pool) {
     try {
       const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
       return res.rows[0] || null;
@@ -82,7 +82,7 @@ async function createVendor(phone, name, location = null) {
       console.error("DB createVendor error, falling back to memory:", err);
     }
   }
-  memoryDb.vendors[phone] = { phone, name, location: loc };
+  memoryDb.vendors[phone] = { phone, name, location };
   return memoryDb.vendors[phone];
 }
 
@@ -108,20 +108,22 @@ async function createDelivery(delivery) {
     }
   }
 
+  const trackingCode = delivery.trackingCode || `AIKA-${Date.now().toString(36).toUpperCase()}`;
   const newDelivery = {
     id: `mem-${memoryDb.deliveries.length + 1}`,
     vendor_phone: delivery.vendorPhone,
     pickup: delivery.pickup || "",
     dropoff: delivery.dropoff || delivery.address || "",
     address: delivery.dropoff || delivery.address || "",
-    item: delivery.category || "Package",
-    status: "available",
+    item: delivery.category || delivery.item || "Package",
+    status: delivery.status || "available",
     tracking_code: trackingCode,
     trackingCode: trackingCode,
     customer_phone: delivery.customerPhone || "",
     rider_lat: null,
     rider_lng: null,
     rider_updated_at: null,
+    batch_id: delivery.batch_id || delivery.batchId || null
   };
   memoryDb.deliveries.push(newDelivery);
   return newDelivery;
@@ -129,33 +131,34 @@ async function createDelivery(delivery) {
 
 async function getDeliveriesByBatchId(batchId) {
   if (!batchId) return [];
-  if (isConnected) {
+  if (pool) {
     try {
-      return await Delivery.find({ batch_id: batchId }).lean();
+      const res = await pool.query("SELECT * FROM deliveries WHERE batch_id = $1", [batchId]);
+      return res.rows;
     } catch (err) {
-      console.error("MongoDB getDeliveriesByBatchId error, falling back to memory:", err.message);
+      console.error("DB getDeliveriesByBatchId error, falling back to memory:", err);
     }
   }
-  return memoryDb.deliveries.filter(d => d.batch_id === batchId);
+  return memoryDb.deliveries.filter(d => d.batch_id === batchId || d.batchId === batchId);
 }
 
 async function updateBatchRating(batchId, rating) {
   if (!batchId) return;
-  if (isConnected) {
+  if (pool) {
     try {
-      await Delivery.updateMany({ batch_id: batchId }, { $set: { rating: Number(rating) } });
+      await pool.query("UPDATE deliveries SET rating = $1 WHERE batch_id = $2", [Number(rating), batchId]);
       return;
     } catch (err) {
-      console.error("MongoDB updateBatchRating error, falling back to memory:", err.message);
+      console.error("DB updateBatchRating error, falling back to memory:", err);
     }
   }
   memoryDb.deliveries.forEach(d => {
-    if (d.batch_id === batchId) d.rating = Number(rating);
+    if (d.batch_id === batchId || d.batchId === batchId) d.rating = Number(rating);
   });
 }
 
 async function getSession(phone) {
-  if (isConnected) {
+  if (pool) {
     try {
       const res = await pool.query("SELECT session_data FROM sessions WHERE phone = $1", [phone]);
       if (res.rows[0]) {
@@ -169,7 +172,7 @@ async function getSession(phone) {
 }
 
 async function saveSession(phone, sessionData) {
-  if (isConnected) {
+  if (pool) {
     try {
       await pool.query(
         `INSERT INTO sessions (phone, session_data, updated_at) 
@@ -187,7 +190,7 @@ async function saveSession(phone, sessionData) {
 }
 
 async function updateDeliveryStatus(deliveryId, status) {
-  if (isConnected) {
+  if (pool) {
     try {
       // Try updating by ID first (if it's an integer)
       const numericId = parseInt(deliveryId, 10);
@@ -223,7 +226,7 @@ async function updateDeliveryStatus(deliveryId, status) {
 }
 
 async function cancelDelivery(deliveryId) {
-  if (isConnected) {
+  if (pool) {
     try {
       const numericId = parseInt(deliveryId, 10);
       // Atomic guarded update: only cancels rows still in 'searching'
@@ -264,7 +267,7 @@ async function cancelDelivery(deliveryId) {
 }
 
 async function markPickedUp(deliveryId) {
-  if (isConnected) {
+  if (pool) {
     try {
       const numericId = parseInt(deliveryId, 10);
       if (!isNaN(numericId)) {
@@ -292,7 +295,7 @@ async function markPickedUp(deliveryId) {
 }
 
 async function updateRiderLocation(trackingCode, lat, lng) {
-  if (isConnected) {
+  if (pool) {
     try {
       const res = await pool.query(
         "UPDATE deliveries SET rider_lat = $1, rider_lng = $2, rider_updated_at = NOW() WHERE tracking_code = $3 RETURNING *",
@@ -315,7 +318,7 @@ async function updateRiderLocation(trackingCode, lat, lng) {
 }
 
 async function getDeliveryByTrackingCode(trackingCode) {
-  if (isConnected) {
+  if (pool) {
     try {
       const res = await pool.query("SELECT * FROM deliveries WHERE tracking_code = $1", [trackingCode]);
       return res.rows[0] || null;
@@ -327,7 +330,7 @@ async function getDeliveryByTrackingCode(trackingCode) {
 }
 
 async function getDeliveriesByVendor(vendorPhone) {
-  if (isConnected) {
+  if (pool) {
     try {
       const res = await pool.query(
         "SELECT * FROM deliveries WHERE vendor_phone = $1 ORDER BY created_at DESC LIMIT 5",
