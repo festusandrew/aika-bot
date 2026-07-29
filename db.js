@@ -70,7 +70,7 @@ async function getVendor(phone) {
     return memoryDb.vendors[phone];
   }
 
-  if (pool) {
+  if (isConnected) {
     try {
       const vendor = await Vendor.findOne({ phone }).lean();
       return vendor || null;
@@ -121,13 +121,14 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
     console.error("Failed to sync vendor to aika-Backend:", err.message);
   }
 
-  if (pool) {
+  if (isConnected) {
     try {
-      const res = await pool.query(
-        "INSERT INTO vendors (phone, name, location) VALUES ($1, $2, $3) ON CONFLICT (phone) DO UPDATE SET name = $2, location = COALESCE($3, vendors.location) RETURNING *",
-        [phone, name, location]
-      );
-      return { ...res.rows[0], ...vendorObj };
+      const doc = await Vendor.findOneAndUpdate(
+        { phone },
+        { $set: { name, location: location || "Kaduna" } },
+        { upsert: true, returnDocument: "after" }
+      ).lean();
+      return { ...doc, ...vendorObj };
     } catch (err) {
       console.error("DB createVendor error, falling back to memory:", err.message);
     }
