@@ -921,7 +921,8 @@ async function handleConfirmSummary(phone, buttonId, session) {
     // Sync delivery job to aika-Backend MongoDB via webhook API
     try {
       const fee = await calculateZoneFee(stop.pickupLat, stop.pickupLng, stop.lat, stop.lng, stop.size);
-      await axios.post("http://localhost:5000/api/jobs/create", {
+      const backendUrl = process.env.BACKEND_API_URL || "http://localhost:5000/api/jobs/create";
+      await axios.post(backendUrl, {
         orderNumber: trackingCode,
         trackingCode: trackingCode,
         vendorName: vendor ? vendor.name : "WhatsApp Vendor",
