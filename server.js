@@ -940,7 +940,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
 
       console.log(`Synced delivery "${trackingCode}" to aika-Backend MongoDB`);
     } catch (err) {
-      console.error("Failed to sync delivery job to aika-Backend:", err.message);
+      console.error("Failed to sync delivery job to aika-Backend:", err.response ? JSON.stringify(err.response.data) : err.message);
     }
   }
 
