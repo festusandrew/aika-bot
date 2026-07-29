@@ -116,7 +116,8 @@ app.post("/webhook", async (req, res) => {
         
         // Sync registered vendor to aika-Backend MongoDB via API
         try {
-          await axios.post("http://localhost:5000/api/vendors", {
+          const vendorApiUrl = process.env.BACKEND_VENDOR_URL || (process.env.BACKEND_API_URL ? process.env.BACKEND_API_URL.replace(/\/jobs\/create$/, '/vendors') : "http://localhost:5000/api/vendors");
+          await axios.post(vendorApiUrl, {
             name: businessName,
             phone: userPhone,
             email: email,
