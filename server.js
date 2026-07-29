@@ -1,3 +1,6 @@
+// Load .env variables (works for both `node server.js` and `node --env-file=.env server.js`)
+try { require('dotenv').config(); } catch (e) { /* dotenv optional — node --env-file=.env also works */ }
+
 const express = require("express");
 const axios = require("axios");
 
@@ -7,6 +10,7 @@ const ai = require("./ai");
 
 const app = express();
 app.use(express.json());
+
 
 // Health check (Render uses this)
 app.get("/", (req, res) => {

@@ -1,3 +1,6 @@
+// Load .env variables before reading process.env (supports both `node server.js` and `node --env-file=.env server.js`)
+try { require(require('path').join(__dirname, 'node_modules', 'dotenv')).config({ path: require('path').join(__dirname, '.env') }); } catch (e) { /* dotenv optional */ }
+
 const mongoose = require("mongoose");
 
 // Mongoose Schemas
