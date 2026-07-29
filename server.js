@@ -934,8 +934,9 @@ async function handleConfirmSummary(phone, buttonId, session) {
         category: stop.category || "General",
         deliveryFee: fee || 1500,
         codAmount: stop.codAmount || 0,
-        status: "Active"
+        status: "available"
       });
+
       console.log(`Synced delivery "${trackingCode}" to aika-Backend MongoDB`);
     } catch (err) {
       console.error("Failed to sync delivery job to aika-Backend:", err.message);
@@ -968,87 +969,91 @@ async function handleConfirmSummary(phone, buttonId, session) {
   }
 
   await sendText(phone, message);
-
-  // Simulate rider assignment after 5 seconds — one rider picks up the whole batch at once
-  setTimeout(async () => {
-    try {
-      const riders = ["Chinedu", "Tunde", "Abubakar", "Emeka"];
-      const riderName = riders[Math.floor(Math.random() * riders.length)];
-      const riderPhone = "080" + Math.floor(10000000 + Math.random() * 90000000);
-      const etaMinutes = Math.floor(3 + Math.random() * 10);
-      const rating = (4.5 + Math.random() * 0.5).toFixed(1);
-      const trips = Math.floor(50 + Math.random() * 200);
-
-      // Stand-in for the real rider app posting to POST /rider/location: seed each
-      // delivery with a starting GPS point near Lagos so the tracking link goes
-      // live. Replace this once a real rider device reports its coordinates.
-      for (const c of created) {
-        const riderLat = 6.5244 + (Math.random() - 0.5) * 0.05;
-        const riderLng = 3.3792 + (Math.random() - 0.5) * 0.05;
-        await db.updateRiderLocation(c.trackingCode, riderLat, riderLng);
-      }
-
-      const riderLines = [
-        `🏍️ Rider assigned!`,
-        `• Name: ${riderName}`,
-        `• Rating: ⭐ ${rating} (${trips} successful deliveries)`,
-        `• Phone: ${riderPhone}`,
-        `• ETA to Pickup: ${etaMinutes} minutes 🕒`,
-        `• Status: Heading to your location`
-      ];
-
-      if (created.length > 1) {
-        riderLines.push(`\nOne rider is handling all ${created.length} deliveries:`);
-        created.forEach((c, i) => {
-          riderLines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
-        });
-      }
-
-      // Cancel action covers every delivery in the batch (comma-separated ids)
-      const cancelId = created.map(c => c.delivery.id).join(",");
-      const cancelTitle = created.length > 1 ? "Cancel All ✕" : "Cancel Delivery ✕";
-
-      await sendButtons(phone, riderLines.join('\n'), [
-        { id: `cancel_del_${cancelId}`, title: cancelTitle }
-      ]);
-    } catch (err) {
-      console.error("Rider simulation error:", err);
-    }
-  }, 5000);
-
-  // Simulate the rider reaching pickup and collecting the package. Once picked up
-  // and heading to the drop-off, the order can no longer be cancelled — so we move
-  // it to 'in_transit' and send a follow-up with no cancel button.
-  setTimeout(async () => {
-    try {
-      const pickedUp = [];
-      for (const c of created) {
-        const updated = await db.markPickedUp(c.delivery.id);
-        // Only announce deliveries that were still active (skips any the vendor cancelled in time)
-        if (updated) pickedUp.push(c);
-      }
-      if (pickedUp.length === 0) return;
-
-      const lines = [
-        pickedUp.length > 1
-          ? `📦 Your ${pickedUp.length} deliveries have been picked up!`
-          : `📦 Your delivery has been picked up!`,
-        `• Status: Rider is on the way to the drop-off 🛵`,
-        `• This order can no longer be cancelled.`
-      ];
-      if (pickedUp.length > 1) {
-        pickedUp.forEach((c, i) => {
-          lines.push(`  ${i + 1}. ${c.trackingCode} · ${c.address}`);
-        });
-      }
-      await sendText(phone, lines.join('\n'));
-    } catch (err) {
-      console.error("Pickup simulation error:", err);
-    }
-  }, 20000);
-
   await sessionManager.clearSession(phone);
 }
+
+// ── Real-time Status Notification Endpoint from Backend / Rider App ──────────────────────
+// Body: { orderNumber, status, riderName, riderPhone, vendorPhone, reason }
+app.post("/bot/notify-status", async (req, res) => {
+  try {
+    const { orderNumber, status, riderName, riderPhone, vendorPhone, reason } = req.body || {};
+    if (!orderNumber || !status || !vendorPhone) {
+      return res.status(400).json({ error: "orderNumber, status, and vendorPhone are required" });
+    }
+
+    const rName = riderName || "Assigned Rider";
+    const rPhone = riderPhone || "In-App Call";
+
+    if (status === "accepted" || status === "heading_to_pickup") {
+      const msg = [
+        `🏍️ Rider Assigned!`,
+        `• Reference: ${orderNumber}`,
+        `• Rider Name: ${rName}`,
+        `• Phone: ${rPhone}`,
+        `• Status: Rider is on the way to pick up your order 🛵`
+      ].join("\n");
+      await sendText(vendorPhone, msg);
+    } else if (status === "heading_to_dropoff" || status === "picked_up" || status === "in_transit") {
+      const msg = [
+        `📦 Order Picked Up!`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`
+      ].join("\n");
+      await sendText(vendorPhone, msg);
+    } else if (status === "at_dropoff") {
+      const msg = [
+        `📍 Arrival Update:`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Rider ${rName} has arrived at customer drop-off location.`
+      ].join("\n");
+      await sendText(vendorPhone, msg);
+    } else if (status === "completed") {
+      const msg = [
+        `✅ Delivery Completed!`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Delivered successfully by Rider ${rName}.`
+      ].join("\n");
+      await sendText(vendorPhone, msg);
+
+      // Send rating stars to vendor
+      try {
+        await sendList(
+          vendorPhone,
+          `🎉 Delivery complete!\n\nPlease rate Rider ${rName}'s service:`,
+          "Rate Rider ⭐",
+          [
+            {
+              title: "Rate Your Rider",
+              rows: [
+                { id: `rate_5_${orderNumber}`, title: "5 Stars ⭐⭐⭐⭐⭐", description: "Excellent service" },
+                { id: `rate_4_${orderNumber}`, title: "4 Stars ⭐⭐⭐⭐", description: "Very good service" },
+                { id: `rate_3_${orderNumber}`, title: "3 Stars ⭐⭐⭐", description: "Average service" },
+                { id: `rate_2_${orderNumber}`, title: "2 Stars ⭐⭐", description: "Below average" },
+                { id: `rate_1_${orderNumber}`, title: "1 Star ⭐", description: "Poor service" }
+              ]
+            }
+          ]
+        );
+      } catch (e) {
+        console.warn("Failed to send rating list:", e.message);
+      }
+    } else if (status === "cancelled" || status === "failed" || status === "issue") {
+      const msg = [
+        `✕ Delivery Alert:`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Delivery cancelled / failed.`,
+        reason ? `• Reason: ${reason}` : ""
+      ].filter(Boolean).join("\n");
+      await sendText(vendorPhone, msg);
+    }
+
+    return res.status(200).json({ ok: true, message: "Vendor notified via WhatsApp" });
+  } catch (err) {
+    console.error("Error sending bot status notification:", err.message);
+    return res.status(500).json({ error: "Failed to send WhatsApp notification" });
+  }
+});
+
 
 // Helper: Calculate zone fee based on distance and package size
 async function calculateZoneFee(pickupLat, pickupLng, lat, lng, size) {

@@ -69,22 +69,13 @@ async function getVendor(phone) {
 
   if (pool) {
     try {
-<<<<<<< HEAD
-      const res = await pool.query("SELECT * FROM vendors WHERE phone = $1", [phone]);
-      if (res.rows[0]) {
-        memoryDb.vendors[phone] = res.rows[0];
-        return res.rows[0];
-      }
-    } catch (err) {
-      console.error("DB getVendor error, falling back to backend API:", err.message);
-=======
       const vendor = await Vendor.findOne({ phone }).lean();
       return vendor || null;
     } catch (err) {
       console.error("MongoDB getVendor error, falling back to memory:", err.message);
->>>>>>> 5d3ff5218583f67853073d955fbffe0fec1b7e07
     }
   }
+
 
   // Fallback: check aika-Backend MongoDB API
   try {
@@ -107,8 +98,6 @@ async function getVendor(phone) {
 
   return null;
 }
-
-<<<<<<< HEAD
 
 async function createVendor(phone, name, location = null, extraDetails = {}) {
   const vendorObj = {
@@ -141,25 +130,9 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
     }
   }
   memoryDb.vendors[phone] = vendorObj;
-=======
-async function createVendor(phone, name, location = null) {
-  if (isConnected) {
-    try {
-      const updated = await Vendor.findOneAndUpdate(
-        { phone },
-        { $set: { name, ...(location ? { location } : {}) } },
-        { returnDocument: 'after', upsert: true, setDefaultsOnInsert: true }
-      ).lean();
-      return updated;
-    } catch (err) {
-      console.error("MongoDB createVendor error, falling back to memory:", err.message);
-    }
-  }
-  const existing = memoryDb.vendors[phone] || {};
-  memoryDb.vendors[phone] = { phone, name, location: location || existing.location || null };
->>>>>>> 5d3ff5218583f67853073d955fbffe0fec1b7e07
   return memoryDb.vendors[phone];
 }
+
 
 
 
