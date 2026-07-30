@@ -4,6 +4,9 @@ try { require('dotenv').config(); } catch (e) { /* dotenv optional — node --en
 const express = require("express");
 const axios = require("axios");
 
+// Determine the backend base URL — use Render-hosted URL in production, localhost in dev
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+
 const db = require("./db");
 const sessionManager = require("./session");
 const ai = require("./ai");
@@ -120,7 +123,7 @@ app.post("/webhook", async (req, res) => {
         
         // Sync registered vendor to aika-Backend MongoDB via API
         try {
-          await axios.post("http://localhost:5000/api/vendors", {
+          await axios.post(`${BACKEND_URL}/api/vendors`, {
             name: businessName,
             phone: userPhone,
             email: email,
@@ -482,9 +485,30 @@ app.post("/webhook", async (req, res) => {
 });
 
 // Helper: Send Text Message
-async function sendText(phone, text) {
-  await sendMessage(phone, text);
+async function sendText(to, text) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to,
+        type: "text",
+        text: { body: text }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+  } catch (err) {
+    console.error("sendText failed:", err.response?.data || err.message);
+    throw err;
+  }
 }
+
 
 // Helper: Send Button Message
 // WhatsApp limits reply button titles to 20 characters; longer titles cause the
@@ -925,8 +949,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
     // Sync delivery job to aika-Backend MongoDB via webhook API
     try {
       const fee = await calculateZoneFee(stop.pickupLat, stop.pickupLng, stop.lat, stop.lng, stop.size);
-      const backendUrl = process.env.BACKEND_API_URL || "http://localhost:5000/api/jobs/create";
-      await axios.post(backendUrl, {
+      await axios.post(`${BACKEND_URL}/api/jobs/create`, {
         orderNumber: trackingCode,
         trackingCode: trackingCode,
         vendorName: vendor ? vendor.name : "WhatsApp Vendor",

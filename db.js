@@ -65,6 +65,8 @@ if (mongoUri && mongoUri.startsWith("mongodb")) {
 
 const axios = require("axios");
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+
 async function getVendor(phone) {
   if (memoryDb.vendors[phone]) {
     return memoryDb.vendors[phone];
@@ -82,7 +84,7 @@ async function getVendor(phone) {
 
   // Fallback: check aika-Backend MongoDB API
   try {
-    const res = await axios.get(`http://localhost:5000/api/vendors/by-phone/${encodeURIComponent(phone)}`);
+    const res = await axios.get(`${BACKEND_URL}/api/vendors/by-phone/${encodeURIComponent(phone)}`);
     if (res.data && res.data.vendor) {
       const v = res.data.vendor;
       const vendorObj = {
@@ -115,7 +117,7 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
 
   // Sync vendor to aika-Backend MongoDB API
   try {
-    await axios.post("http://localhost:5000/api/vendors", vendorObj);
+    await axios.post(`${BACKEND_URL}/api/vendors`, vendorObj);
     console.log(`Synced vendor "${name}" (${phone}) to aika-Backend MongoDB`);
   } catch (err) {
     console.error("Failed to sync vendor to aika-Backend:", err.message);
