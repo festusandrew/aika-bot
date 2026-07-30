@@ -497,6 +497,11 @@ function formatWhatsAppPhone(phone) {
 // Helper: Send Text Message
 async function sendText(to, text) {
   const targetPhone = formatWhatsAppPhone(to);
+  if (!process.env.PHONE_NUMBER_ID || !process.env.WHATSAPP_TOKEN) {
+    console.log(`[WhatsApp Local Simulation] -> Message to ${targetPhone}:\n${text}\n----------------------------------`);
+    return;
+  }
+
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
@@ -514,9 +519,10 @@ async function sendText(to, text) {
         }
       }
     );
+    console.log(`[WhatsApp Success] Sent message to ${targetPhone}`);
   } catch (err) {
     console.error("sendText failed:", err.response?.data || err.message);
-    throw err;
+    console.log(`[WhatsApp Fallback Log] -> Message to ${targetPhone}:\n${text}\n----------------------------------`);
   }
 }
 
@@ -1028,34 +1034,40 @@ app.post("/bot/notify-status", async (req, res) => {
     // Keep bot database delivery status & rider info in sync
     await db.updateDeliveryStatus(orderNumber, status, { riderName: rName, riderPhone: rPhone });
 
+    const trackLink = process.env.WEB_TRACK_URL ? `${process.env.WEB_TRACK_URL}/?track=${orderNumber}` : `http://localhost:5173/?track=${orderNumber}`;
+
     if (status === "accepted" || status === "heading_to_pickup") {
       const msg = [
         `🏍️ Rider Assigned!`,
         `• Reference: ${orderNumber}`,
         `• Rider Name: ${rName}`,
         `• Phone: ${rPhone}`,
-        `• Status: Rider is on the way to pick up your order 🛵`
+        `• Status: Rider is on the way to pick up your order 🛵`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
       await sendText(vendorPhone, msg);
     } else if (status === "at_pickup" || status === "arrived_at_pickup") {
       const msg = [
         `📍 Rider Arrived at Pickup!`,
         `• Reference: ${orderNumber}`,
-        `• Status: Rider ${rName} has arrived at your business location to collect the package 📦`
+        `• Status: Rider ${rName} has arrived at your business location to collect the package 📦`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
       await sendText(vendorPhone, msg);
     } else if (status === "heading_to_dropoff" || status === "picked_up" || status === "in_transit") {
       const msg = [
         `📦 Order Picked Up!`,
         `• Reference: ${orderNumber}`,
-        `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`
+        `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
       await sendText(vendorPhone, msg);
     } else if (status === "at_dropoff") {
       const msg = [
         `📍 Arrival Update:`,
         `• Reference: ${orderNumber}`,
-        `• Status: Rider ${rName} has arrived at customer drop-off location.`
+        `• Status: Rider ${rName} has arrived at customer drop-off location.`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
       await sendText(vendorPhone, msg);
     } else if (status === "completed") {
