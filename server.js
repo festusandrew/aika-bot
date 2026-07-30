@@ -1037,6 +1037,13 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Status: Rider is on the way to pick up your order 🛵`
       ].join("\n");
       await sendText(vendorPhone, msg);
+    } else if (status === "at_pickup" || status === "arrived_at_pickup") {
+      const msg = [
+        `📍 Rider Arrived at Pickup!`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Rider ${rName} has arrived at your business location to collect the package 📦`
+      ].join("\n");
+      await sendText(vendorPhone, msg);
     } else if (status === "heading_to_dropoff" || status === "picked_up" || status === "in_transit") {
       const msg = [
         `📦 Order Picked Up!`,
