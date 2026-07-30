@@ -1012,6 +1012,9 @@ app.post("/bot/notify-status", async (req, res) => {
     const rName = riderName || "Assigned Rider";
     const rPhone = riderPhone || "In-App Call";
 
+    // Keep bot database delivery status & rider info in sync
+    await db.updateDeliveryStatus(orderNumber, status, { riderName: rName, riderPhone: rPhone });
+
     if (status === "accepted" || status === "heading_to_pickup") {
       const msg = [
         `🏍️ Rider Assigned!`,
