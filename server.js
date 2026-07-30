@@ -1024,10 +1024,11 @@ async function handleConfirmSummary(phone, buttonId, session) {
 app.post("/bot/notify-status", async (req, res) => {
   try {
     const { orderNumber, status, riderName, riderPhone, vendorPhone, reason } = req.body || {};
-    if (!orderNumber || !status || !vendorPhone) {
-      return res.status(400).json({ error: "orderNumber, status, and vendorPhone are required" });
+    if (!orderNumber || !status) {
+      return res.status(400).json({ error: "orderNumber and status are required" });
     }
 
+    const targetPhone = vendorPhone || "08000000000";
     const rName = riderName || "Assigned Rider";
     const rPhone = riderPhone || "In-App Call";
 
@@ -1045,7 +1046,7 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Status: Rider is on the way to pick up your order 🛵`,
         `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "at_pickup" || status === "arrived_at_pickup") {
       const msg = [
         `📍 Rider Arrived at Pickup!`,
@@ -1053,7 +1054,7 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Status: Rider ${rName} has arrived at your business location to collect the package 📦`,
         `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "heading_to_dropoff" || status === "picked_up" || status === "in_transit") {
       const msg = [
         `📦 Order Picked Up!`,
@@ -1061,7 +1062,7 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`,
         `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "at_dropoff") {
       const msg = [
         `📍 Arrival Update:`,
@@ -1069,19 +1070,19 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Status: Rider ${rName} has arrived at customer drop-off location.`,
         `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "completed") {
       const msg = [
         `✅ Delivery Completed!`,
         `• Reference: ${orderNumber}`,
         `• Status: Delivered successfully by Rider ${rName}.`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
 
       // Send rating stars to vendor
       try {
         await sendList(
-          vendorPhone,
+          targetPhone,
           `🎉 Delivery complete!\n\nPlease rate Rider ${rName}'s service:`,
           "Rate Rider ⭐",
           [
