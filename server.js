@@ -484,15 +484,26 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
+// Helper: Format phone number into WhatsApp international format (e.g. 23480...)
+function formatWhatsAppPhone(phone) {
+  if (!phone) return "";
+  let clean = String(phone).replace(/\D/g, "");
+  if (clean.startsWith("0") && clean.length === 11) {
+    clean = "234" + clean.slice(1);
+  }
+  return clean;
+}
+
 // Helper: Send Text Message
 async function sendText(to, text) {
+  const targetPhone = formatWhatsAppPhone(to);
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: targetPhone,
         type: "text",
         text: { body: text }
       },
@@ -529,13 +540,14 @@ async function sendButtons(to, text, buttons) {
     };
   });
 
+  const targetPhone = formatWhatsAppPhone(to);
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: targetPhone,
         type: "interactive",
         interactive: {
           type: "button",
@@ -563,6 +575,7 @@ async function sendButtons(to, text, buttons) {
 
 // Helper: Send Interactive List Message (WhatsApp List options)
 async function sendList(to, text, buttonTitle, sections) {
+  const targetPhone = formatWhatsAppPhone(to);
   let safeButtonTitle = buttonTitle || "Select Option";
   if (safeButtonTitle.length > 20) {
     safeButtonTitle = safeButtonTitle.slice(0, 20);
@@ -583,7 +596,7 @@ async function sendList(to, text, buttonTitle, sections) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: targetPhone,
         type: "interactive",
         interactive: {
           type: "list",
