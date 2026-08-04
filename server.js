@@ -4,6 +4,9 @@ try { require('dotenv').config(); } catch (e) { /* dotenv optional — node --en
 const express = require("express");
 const axios = require("axios");
 
+// Determine the backend base URL — use Render-hosted URL in production, localhost in dev
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+
 const db = require("./db");
 const sessionManager = require("./session");
 const ai = require("./ai");
@@ -117,11 +120,10 @@ app.post("/webhook", async (req, res) => {
         const location = session.onboardingLocation || "Kaduna";
 
         await db.createVendor(userPhone, businessName, location, { ownerName, category, email });
-        
+
         // Sync registered vendor to aika-Backend MongoDB via API
         try {
-          const vendorApiUrl = process.env.BACKEND_VENDOR_URL || (process.env.BACKEND_API_URL ? process.env.BACKEND_API_URL.replace(/\/jobs\/create$/, '/vendors') : "http://localhost:5000/api/vendors");
-          await axios.post(vendorApiUrl, {
+          await axios.post("http://localhost:5000/api/vendors", {
             name: businessName,
             phone: userPhone,
             email: email,
@@ -500,10 +502,48 @@ app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 });
 
-// Helper: Send Text Message
-async function sendText(phone, text) {
-  await sendMessage(phone, text);
+// Helper: Format phone number into WhatsApp international format (e.g. 23480...)
+function formatWhatsAppPhone(phone) {
+  if (!phone) return "";
+  let clean = String(phone).replace(/\D/g, "");
+  if (clean.startsWith("0") && clean.length === 11) {
+    clean = "234" + clean.slice(1);
+  }
+  return clean;
 }
+
+// Helper: Send Text Message
+async function sendText(to, text) {
+  const targetPhone = formatWhatsAppPhone(to);
+  if (!process.env.PHONE_NUMBER_ID || !process.env.WHATSAPP_TOKEN) {
+    console.log(`[WhatsApp Local Simulation] -> Message to ${targetPhone}:\n${text}\n----------------------------------`);
+    return;
+  }
+
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: targetPhone,
+        type: "text",
+        text: { body: text }
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.WHATSAPP_TOKEN}`,
+          "Content-Type": "application/json"
+        }
+      }
+    );
+    console.log(`[WhatsApp Success] Sent message to ${targetPhone}`);
+  } catch (err) {
+    console.error("sendText failed:", err.response?.data || err.message);
+    console.log(`[WhatsApp Fallback Log] -> Message to ${targetPhone}:\n${text}\n----------------------------------`);
+  }
+}
+
 
 // Helper: Send Button Message
 // WhatsApp limits reply button titles to 20 characters; longer titles cause the
@@ -524,13 +564,14 @@ async function sendButtons(to, text, buttons) {
     };
   });
 
+  const targetPhone = formatWhatsAppPhone(to);
   try {
     await axios.post(
       `https://graph.facebook.com/v20.0/${process.env.PHONE_NUMBER_ID}/messages`,
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: targetPhone,
         type: "interactive",
         interactive: {
           type: "button",
@@ -558,6 +599,7 @@ async function sendButtons(to, text, buttons) {
 
 // Helper: Send Interactive List Message (WhatsApp List options)
 async function sendList(to, text, buttonTitle, sections) {
+  const targetPhone = formatWhatsAppPhone(to);
   let safeButtonTitle = buttonTitle || "Select Option";
   if (safeButtonTitle.length > 20) {
     safeButtonTitle = safeButtonTitle.slice(0, 20);
@@ -578,7 +620,7 @@ async function sendList(to, text, buttonTitle, sections) {
       {
         messaging_product: "whatsapp",
         recipient_type: "individual",
-        to,
+        to: targetPhone,
         type: "interactive",
         interactive: {
           type: "list",
@@ -974,8 +1016,7 @@ async function handleConfirmSummary(phone, buttonId, session) {
     // Sync delivery job to aika-Backend MongoDB via webhook API
     try {
       const fee = await calculateZoneFee(stop.pickupLat, stop.pickupLng, stop.lat, stop.lng, stop.size);
-      const backendUrl = process.env.BACKEND_API_URL || "http://localhost:5000/api/jobs/create";
-      await axios.post(backendUrl, {
+      await axios.post(`${BACKEND_URL}/api/jobs/create`, {
         orderNumber: trackingCode,
         trackingCode: trackingCode,
         vendorName: vendor ? vendor.name : "WhatsApp Vendor",
@@ -1031,12 +1072,18 @@ async function handleConfirmSummary(phone, buttonId, session) {
 app.post("/bot/notify-status", async (req, res) => {
   try {
     const { orderNumber, status, riderName, riderPhone, vendorPhone, reason } = req.body || {};
-    if (!orderNumber || !status || !vendorPhone) {
-      return res.status(400).json({ error: "orderNumber, status, and vendorPhone are required" });
+    if (!orderNumber || !status) {
+      return res.status(400).json({ error: "orderNumber and status are required" });
     }
 
+    const targetPhone = vendorPhone || "08000000000";
     const rName = riderName || "Assigned Rider";
     const rPhone = riderPhone || "In-App Call";
+
+    // Keep bot database delivery status & rider info in sync
+    await db.updateDeliveryStatus(orderNumber, status, { riderName: rName, riderPhone: rPhone });
+
+    const trackLink = process.env.WEB_TRACK_URL ? `${process.env.WEB_TRACK_URL}/?track=${orderNumber}` : `http://localhost:5173/?track=${orderNumber}`;
 
     if (status === "accepted" || status === "heading_to_pickup") {
       const msg = [
@@ -1044,35 +1091,46 @@ app.post("/bot/notify-status", async (req, res) => {
         `• Reference: ${orderNumber}`,
         `• Rider Name: ${rName}`,
         `• Phone: ${rPhone}`,
-        `• Status: Rider is on the way to pick up your order 🛵`
+        `• Status: Rider is on the way to pick up your order 🛵`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
+    } else if (status === "at_pickup" || status === "arrived_at_pickup") {
+      const msg = [
+        `📍 Rider Arrived at Pickup!`,
+        `• Reference: ${orderNumber}`,
+        `• Status: Rider ${rName} has arrived at your business location to collect the package 📦`,
+        `🌐 Live GPS Track: ${trackLink}`
+      ].join("\n");
+      await sendText(targetPhone, msg);
     } else if (status === "heading_to_dropoff" || status === "picked_up" || status === "in_transit") {
       const msg = [
         `📦 Order Picked Up!`,
         `• Reference: ${orderNumber}`,
-        `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`
+        `• Status: Rider ${rName} has collected the package and is heading to customer drop-off 🛵`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "at_dropoff") {
       const msg = [
         `📍 Arrival Update:`,
         `• Reference: ${orderNumber}`,
-        `• Status: Rider ${rName} has arrived at customer drop-off location.`
+        `• Status: Rider ${rName} has arrived at customer drop-off location.`,
+        `🌐 Live GPS Track: ${trackLink}`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
     } else if (status === "completed") {
       const msg = [
         `✅ Delivery Completed!`,
         `• Reference: ${orderNumber}`,
         `• Status: Delivered successfully by Rider ${rName}.`
       ].join("\n");
-      await sendText(vendorPhone, msg);
+      await sendText(targetPhone, msg);
 
       // Send rating stars to vendor
       try {
         await sendList(
-          vendorPhone,
+          targetPhone,
           `🎉 Delivery complete!\n\nPlease rate Rider ${rName}'s service:`,
           "Rate Rider ⭐",
           [

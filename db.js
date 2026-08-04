@@ -28,15 +28,44 @@ const deliverySchema = new mongoose.Schema({
   customer_phone: { type: String, default: "" },
   batch_id: { type: String, index: true, default: null },
   rating: { type: Number, default: null },
+  rider_name: { type: String, default: "" },
+  rider_phone: { type: String, default: "" },
   rider_lat: { type: Number, default: null },
   rider_lng: { type: Number, default: null },
   rider_updated_at: { type: Date, default: null },
   created_at: { type: Date, default: Date.now }
 });
 
-const Vendor = mongoose.model("Vendor", vendorSchema);
-const Session = mongoose.model("Session", sessionSchema);
-const Delivery = mongoose.model("Delivery", deliverySchema);
+const jobSchema = new mongoose.Schema({
+  orderNumber: { type: String, required: true },
+  trackingCode: { type: String, default: "" },
+  vendorPhone: { type: String, default: "" },
+  vendor: {
+    name: { type: String, default: "WhatsApp Vendor" },
+    address: { type: String, default: "Kaduna" },
+    itemsDescription: { type: String, default: "Package" },
+  },
+  customer: {
+    name: { type: String, default: "Customer" },
+    address: { type: String, default: "Kaduna" },
+    phone: { type: String, default: "" },
+  },
+  category: { type: String, default: "General" },
+  deliveryFee: { type: Number, default: 1500 },
+  codAmount: { type: Number, default: 0 },
+  amountFormatted: { type: String, default: "₦1,500" },
+  status: { type: String, default: "available" },
+  riderId: { type: mongoose.Schema.Types.ObjectId, ref: "Rider", default: null },
+  riderName: { type: String, default: "" },
+  riderPhone: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const Vendor = mongoose.models.Vendor || mongoose.model("Vendor", vendorSchema);
+const Session = mongoose.models.Session || mongoose.model("Session", sessionSchema);
+const Delivery = mongoose.models.Delivery || mongoose.model("Delivery", deliverySchema);
+const Job = mongoose.models.Job || mongoose.model("Job", jobSchema);
 
 let isConnected = false;
 
@@ -65,24 +94,37 @@ if (mongoUri && mongoUri.startsWith("mongodb")) {
 
 const axios = require("axios");
 
+const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+
 async function getVendor(phone) {
+  if (!phone) return null;
+  const cleanDigits = phone.replace(/\D/g, "");
+  const last10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
+
   if (memoryDb.vendors[phone]) {
     return memoryDb.vendors[phone];
+  }
+  for (const p in memoryDb.vendors) {
+    if (p.replace(/\D/g, "").slice(-10) === last10) {
+      return memoryDb.vendors[p];
+    }
   }
 
   if (isConnected) {
     try {
-      const vendor = await Vendor.findOne({ phone }).lean();
-      return vendor || null;
+      let vendor = await Vendor.findOne({ phone }).lean();
+      if (!vendor && last10) {
+        vendor = await Vendor.findOne({ phone: { $regex: last10 + "$", $options: "i" } }).lean();
+      }
+      if (vendor) return vendor;
     } catch (err) {
       console.error("MongoDB getVendor error, falling back to memory:", err.message);
     }
   }
 
-
   // Fallback: check aika-Backend MongoDB API
   try {
-    const res = await axios.get(`http://localhost:5000/api/vendors/by-phone/${encodeURIComponent(phone)}`);
+    const res = await axios.get(`${BACKEND_URL}/api/vendors/by-phone/${encodeURIComponent(phone)}`);
     if (res.data && res.data.vendor) {
       const v = res.data.vendor;
       const vendorObj = {
@@ -115,7 +157,7 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
 
   // Sync vendor to aika-Backend MongoDB API
   try {
-    await axios.post("http://localhost:5000/api/vendors", vendorObj);
+    await axios.post(`${BACKEND_URL}/api/vendors`, vendorObj);
     console.log(`Synced vendor "${name}" (${phone}) to aika-Backend MongoDB`);
   } catch (err) {
     console.error("Failed to sync vendor to aika-Backend:", err.message);
@@ -141,21 +183,56 @@ async function createVendor(phone, name, location = null, extraDetails = {}) {
 
 
 async function createDelivery(delivery) {
+  const trackingCode = delivery.trackingCode || ("AK" + Math.floor(100000 + Math.random() * 900000));
+  const fee = Number(delivery.deliveryFee) || 1500;
+  const cod = Number(delivery.codAmount) || 0;
+
   if (isConnected) {
     try {
       const count = await Delivery.countDocuments();
       const nextId = count + 1;
+      const vendorObj = await getVendor(delivery.vendorPhone);
+
+      // 1. Create Delivery in bot DB
       const newDoc = await Delivery.create({
         id: nextId,
         vendor_phone: delivery.vendorPhone,
-        pickup: delivery.pickup || "",
+        pickup: delivery.pickup || (vendorObj ? vendorObj.location : ""),
         dropoff: delivery.dropoff || delivery.address || "",
         item: delivery.item || delivery.category || "",
-        status: delivery.status || "searching",
-        tracking_code: delivery.trackingCode || "",
+        status: delivery.status || "available",
+        tracking_code: trackingCode,
         customer_phone: delivery.customerPhone || "",
         batch_id: delivery.batchId || null
       });
+
+      // 2. Direct Sync into Job collection (read by Web Dashboard & Rider App)
+      try {
+        await Job.create({
+          orderNumber: trackingCode,
+          trackingCode: trackingCode,
+          vendorPhone: delivery.vendorPhone || "",
+          vendor: {
+            name: vendorObj ? vendorObj.name : "WhatsApp Vendor",
+            address: delivery.pickup || (vendorObj ? vendorObj.location : "Kaduna"),
+            itemsDescription: delivery.item || delivery.category || "Package",
+          },
+          customer: {
+            name: "Customer",
+            address: delivery.dropoff || delivery.address || "Kaduna",
+            phone: delivery.customerPhone || delivery.vendorPhone || "",
+          },
+          category: delivery.category || "General",
+          deliveryFee: fee,
+          codAmount: cod,
+          amountFormatted: `₦${(cod + fee).toLocaleString()}`,
+          status: "available",
+        });
+        console.log(`Directly created Job document "${trackingCode}" in MongoDB`);
+      } catch (jobErr) {
+        console.error("Direct Job creation error in bot:", jobErr.message);
+      }
+
       return newDoc.toObject();
     } catch (err) {
       console.error("MongoDB createDelivery error, falling back to memory:", err.message);
@@ -168,8 +245,8 @@ async function createDelivery(delivery) {
     pickup: delivery.pickup || "",
     dropoff: delivery.dropoff || delivery.address || "",
     item: delivery.item || delivery.category || "",
-    status: delivery.status || "searching",
-    tracking_code: delivery.trackingCode || "",
+    status: delivery.status || "available",
+    tracking_code: trackingCode,
     customer_phone: delivery.customerPhone || "",
     batch_id: delivery.batchId || null,
     rating: null,
@@ -239,7 +316,11 @@ async function saveSession(phone, sessionData) {
   memoryDb.sessions[phone] = sessionData;
 }
 
-async function updateDeliveryStatus(deliveryId, status) {
+async function updateDeliveryStatus(deliveryId, status, extraFields = {}) {
+  const updateObj = { status };
+  if (extraFields.riderName || extraFields.rider_name) updateObj.rider_name = extraFields.riderName || extraFields.rider_name;
+  if (extraFields.riderPhone || extraFields.rider_phone) updateObj.rider_phone = extraFields.riderPhone || extraFields.rider_phone;
+
   if (isConnected) {
     try {
       const numericId = parseInt(deliveryId, 10);
@@ -249,10 +330,26 @@ async function updateDeliveryStatus(deliveryId, status) {
 
       const updated = await Delivery.findOneAndUpdate(
         query,
-        { $set: { status } },
+        { $set: updateObj },
         { returnDocument: 'after' }
       ).lean();
-      if (updated) return updated;
+
+      // Keep Job document in sync for Web Dashboard and Rider App
+      try {
+        const jobUpdate = { status };
+        if (extraFields.riderName || extraFields.rider_name) jobUpdate.riderName = extraFields.riderName || extraFields.rider_name;
+        if (extraFields.riderPhone || extraFields.rider_phone) jobUpdate.riderPhone = extraFields.riderPhone || extraFields.rider_phone;
+        await Job.findOneAndUpdate(
+          { $or: [{ orderNumber: deliveryId }, { trackingCode: deliveryId }] },
+          { $set: jobUpdate }
+        );
+      } catch (e) { /* ignore */ }
+
+      if (updated) {
+        if (!updated.riderName && updated.rider_name) updated.riderName = updated.rider_name;
+        if (!updated.riderPhone && updated.rider_phone) updated.riderPhone = updated.rider_phone;
+        return updated;
+      }
     } catch (err) {
       console.error("MongoDB updateDeliveryStatus error, falling back to memory:", err.message);
     }
@@ -264,6 +361,14 @@ async function updateDeliveryStatus(deliveryId, status) {
   );
   if (delivery) {
     delivery.status = status;
+    if (updateObj.rider_name) {
+      delivery.rider_name = updateObj.rider_name;
+      delivery.riderName = updateObj.rider_name;
+    }
+    if (updateObj.rider_phone) {
+      delivery.rider_phone = updateObj.rider_phone;
+      delivery.riderPhone = updateObj.rider_phone;
+    }
     return delivery;
   }
   return null;
@@ -363,15 +468,22 @@ async function updateRiderLocation(trackingCode, lat, lng) {
 }
 
 async function getDeliveryByTrackingCode(trackingCode) {
+  let delivery = null;
   if (isConnected) {
     try {
-      const delivery = await Delivery.findOne({ tracking_code: trackingCode }).lean();
-      return delivery || null;
+      delivery = await Delivery.findOne({ tracking_code: trackingCode }).lean();
     } catch (err) {
       console.error("MongoDB getDeliveryByTrackingCode error, falling back to memory:", err.message);
     }
   }
-  return memoryDb.deliveries.find(d => d.tracking_code === trackingCode) || null;
+  if (!delivery) {
+    delivery = memoryDb.deliveries.find(d => d.tracking_code === trackingCode) || null;
+  }
+  if (delivery) {
+    if (!delivery.riderName && delivery.rider_name) delivery.riderName = delivery.rider_name;
+    if (!delivery.riderPhone && delivery.rider_phone) delivery.riderPhone = delivery.rider_phone;
+  }
+  return delivery;
 }
 
 async function getDeliveriesByVendor(vendorPhone) {
