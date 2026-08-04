@@ -155,6 +155,12 @@ app.post("/webhook", async (req, res) => {
 
       if (session.step === "onboarding_name") {
         session.onboardingName = userText;
+        session.step = "onboarding_location";
+        await sessionManager.saveSession(userPhone, session);
+        await sendText(userPhone, "What is your Business Location / Pickup Address? (e.g. Barnawa Shopping Complex, Kaduna):");
+
+        /*
+        // COMMENTED OUT FOR NOW:
         session.step = "onboarding_owner";
         await sessionManager.saveSession(userPhone, session);
         await sendText(userPhone, `Great! What is the Owner or Manager's Name for "${userText}"?`);
@@ -182,23 +188,24 @@ app.post("/webhook", async (req, res) => {
         session.step = "onboarding_location";
         await sessionManager.saveSession(userPhone, session);
         await sendText(userPhone, "What is your Business Location / Pickup Address? (e.g. Barnawa Shopping Complex, Kaduna):");
+        */
       } else if (session.step === "onboarding_location") {
         session.onboardingLocation = userText;
         session.step = "onboarding_confirm";
         await sessionManager.saveSession(userPhone, session);
 
-        const summaryMsg = [
+        const summaryLines = [
           `🏢 Confirm your business details:`,
-          `• Business Name: ${session.onboardingName}`,
-          `• Owner/Manager: ${session.onboardingOwner}`,
-          `• Category: ${session.onboardingCategory}`,
-          `• Email: ${session.onboardingEmail}`,
-          `• Location: ${session.onboardingLocation}`,
-          `• Phone: ${userPhone}`,
-          `\nIs this information correct?`
-        ].join('\n');
+          `• Business Name: ${session.onboardingName}`
+        ];
+        if (session.onboardingOwner) summaryLines.push(`• Owner/Manager: ${session.onboardingOwner}`);
+        if (session.onboardingCategory) summaryLines.push(`• Category: ${session.onboardingCategory}`);
+        if (session.onboardingEmail) summaryLines.push(`• Email: ${session.onboardingEmail}`);
+        summaryLines.push(`• Location: ${session.onboardingLocation}`);
+        summaryLines.push(`• Phone: ${userPhone}`);
+        summaryLines.push(`\nIs this information correct?`);
 
-        await sendButtons(userPhone, summaryMsg, [
+        await sendButtons(userPhone, summaryLines.join('\n'), [
           { id: "vendor_confirm_yes", title: "Confirm & Save ✅" },
           { id: "vendor_confirm_no", title: "Re-enter Details ✏️" }
         ]);
