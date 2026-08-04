@@ -154,10 +154,18 @@ app.post("/webhook", async (req, res) => {
       }
 
       if (session.step === "onboarding_name") {
-        session.onboardingName = userText;
+        const textLower = userText.trim().toLowerCase();
+        const genericGreetings = ["hi", "hello", "hey", "start", "get started", "menu", "aika", "good morning", "good afternoon", "good evening"];
+
+        if (genericGreetings.includes(textLower)) {
+          await sendText(userPhone, "Welcome to Aika! 🚚\n\nPlease enter your Business Name to register:");
+          return res.sendStatus(200);
+        }
+
+        session.onboardingName = userText.trim();
         session.step = "onboarding_location";
         await sessionManager.saveSession(userPhone, session);
-        await sendText(userPhone, "What is your Business Location / Pickup Address? (e.g. Barnawa Shopping Complex, Kaduna):");
+        await sendText(userPhone, `Awesome, "${userText.trim()}"! 📍\n\nWhat is your Business Location / Pickup Address? (e.g. Barnawa Shopping Complex, Kaduna):`);
 
         /*
         // COMMENTED OUT FOR NOW:
