@@ -136,7 +136,7 @@ app.post("/webhook", async (req, res) => {
           console.error("Failed to sync vendor to aika-Backend:", err.message);
         }
 
-        await sendText(userPhone, `Awesome! Your business "${businessName}" has been registered successfully! 🎉\n\nLocation: ${location}\nCategory: ${category}`);
+        await sendText(userPhone, `Awesome! Your business "${businessName}" has been registered successfully! 🎉\n\nLocation: ${location}`);
         delete session.onboardingName;
         delete session.onboardingOwner;
         delete session.onboardingCategory;
