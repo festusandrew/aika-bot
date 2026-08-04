@@ -1,3 +1,6 @@
+// Load .env variables (works for both `node server.js` and `node --env-file=.env server.js`)
+try { require('dotenv').config(); } catch (e) { /* dotenv optional — node --env-file=.env also works */ }
+
 const express = require("express");
 const axios = require("axios");
 
@@ -7,6 +10,7 @@ const ai = require("./ai");
 
 const app = express();
 app.use(express.json());
+
 
 // Health check (Render uses this)
 app.get("/", (req, res) => {
@@ -203,6 +207,11 @@ app.post("/webhook", async (req, res) => {
       return res.sendStatus(200);
     }
 
+    // Check if user clicked cancel button or typed cancellation keywords during active setup steps
+    if (buttonId === "btn_cancel_draft") {
+      await handleCancelPlacement(userPhone, session);
+      return res.sendStatus(200);
+    }
 
     // Routing based on button actions
     if (buttonId) {
@@ -341,6 +350,17 @@ app.post("/webhook", async (req, res) => {
     }
 
     // Normal text message handling based on conversational step
+    const isStepActive = session.step && (
+      session.step.startsWith("awaiting_") ||
+      session.step.startsWith("confirm_") ||
+      session.step.startsWith("onboarding_")
+    );
+
+    if (isStepActive && isCancelText(userText)) {
+      await handleCancelPlacement(userPhone, session);
+      return res.sendStatus(200);
+    }
+
     if (session.step === "awaiting_address_input") {
       session.draftDelivery = { address: userText };
       session.step = "confirm_address_input";
@@ -348,12 +368,14 @@ app.post("/webhook", async (req, res) => {
 
       await sendButtons(userPhone, `Address entered:\n${userText}\n\nIs this correct?`, [
         { id: "confirm_address", title: "Confirm Address" },
-        { id: "edit_address", title: "Edit Address" }
+        { id: "edit_address", title: "Edit Address" },
+        { id: "btn_cancel_draft", title: "Cancel ✕" }
       ]);
     } else if (session.step === "confirm_address_input") {
       await sendButtons(userPhone, `Please select one of the options to proceed:\n\nAddress entered:\n${session.draftDelivery.address}`, [
         { id: "confirm_address", title: "Confirm Address" },
-        { id: "edit_address", title: "Edit Address" }
+        { id: "edit_address", title: "Edit Address" },
+        { id: "btn_cancel_draft", title: "Cancel ✕" }
       ]);
     } else if (session.step === "awaiting_customer_phone") {
       const inputPhone = userText.trim();
@@ -586,6 +608,31 @@ async function sendList(to, text, buttonTitle, sections) {
   }
 }
 
+function isCancelText(text) {
+  if (!text || typeof text !== "string") return false;
+  const t = text.trim().toLowerCase();
+  const cancelKeywords = [
+    "cancel", "cancel delivery", "cancel order", "cancel placement", "stop", "abort",
+    "exit", "quit", "nevermind", "never mind", "don't continue",
+    "dont continue", "forget it", "start over", "reset", "go back", "main menu", "menu"
+  ];
+  return cancelKeywords.some(kw => t === kw || t.startsWith("cancel ") || t === "cancel");
+}
+
+async function handleCancelPlacement(phone, session) {
+  delete session.draftDelivery;
+  delete session.batch;
+  delete session.onboardingName;
+  delete session.onboardingOwner;
+  delete session.onboardingCategory;
+  delete session.onboardingEmail;
+  delete session.onboardingLocation;
+  session.step = "menu";
+  await sessionManager.saveSession(phone, session);
+  await sendText(phone, "❌ Delivery placement cancelled.");
+  await handleMenu(phone, null, session);
+}
+
 // User-provided logic: Main menu handler
 async function handleMenu(phone, input, session) {
   const vendor = await db.getVendor(phone);
@@ -708,6 +755,11 @@ async function sendTrackingStatus(phone, trackingCode) {
 async function handleSmartMessage(phone, text, session) {
   const understood = await ai.understandMessage(text);
 
+  if (understood.intent === "cancel") {
+    await handleCancelPlacement(phone, session);
+    return;
+  }
+
   if (understood.intent === "create_delivery") {
     // Pre-fill whatever the AI extracted, then jump into the flow at the first gap.
     // Only carry over fields that map cleanly onto the guided flow. The item is
@@ -763,7 +815,8 @@ async function advanceDeliveryFlow(phone, session) {
   await sessionManager.saveSession(phone, session);
   await sendButtons(phone, `Got it. Address:\n${d.address}\n\nIs this correct?`, [
     { id: "confirm_address", title: "Confirm Address" },
-    { id: "edit_address", title: "Edit Address" }
+    { id: "edit_address", title: "Edit Address" },
+    { id: "btn_cancel_draft", title: "Cancel ✕" }
   ]);
 }
 
@@ -892,8 +945,7 @@ async function handleRiderStatusUpdate(trackingCode, status, reason = "") {
 // User-provided logic: Handle confirmation of summary
 async function handleConfirmSummary(phone, buttonId, session) {
   if (buttonId === 'confirm_no') {
-    await sessionManager.clearSession(phone);
-    await sendText(phone, 'Cancelled. Send "hi" to start again.');
+    await handleCancelPlacement(phone, session);
     return;
   }
 

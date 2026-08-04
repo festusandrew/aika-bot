@@ -1,14 +1,19 @@
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-// The AI layer only steps in when the guided button flow doesn't handle a message
+// The AI layer steps in when guided button flow doesn't handle a message
 // (free text at the menu, or an unrecognized reply). It never replaces the flow.
 //
-// understandMessage() makes a single Gemini call that both classifies the intent
+// understandMessage() makes a Gemini call that both classifies the intent
 // and, where relevant, extracts delivery fields or drafts a best-effort answer.
 // On any failure (missing key, network, bad JSON) it returns { intent: "unknown" }
-// so the bot always falls back to the existing menu instead of crashing.
+// so the bot always falls back safely to the menu instead of crashing.
 
-const MODEL_NAME = "gemini-1.5-flash";
+const MODEL_CANDIDATES = [
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-1.5-flash"
+];
 
 let genAI = null;
 if (process.env.GEMINI_API_KEY) {
@@ -18,9 +23,8 @@ if (process.env.GEMINI_API_KEY) {
 }
 
 // Grounding facts so best-effort answers stay close to how Aika actually works.
-// Anything outside these facts is the model's general knowledge and may be approximate.
 const SERVICE_FACTS = `
-Aika is a WhatsApp logistics assistant for delivery vendors in Nigeria (Lagos area).
+Aika is a WhatsApp logistics assistant for delivery vendors in Nigeria (Lagos & Kaduna area).
 How it works:
 - Vendors create deliveries by giving a drop-off address, the customer's phone number,
   what is being delivered, and whether the customer pays cash on delivery or has prepaid.
@@ -43,7 +47,7 @@ ${SERVICE_FACTS}
 
 Read the vendor's message and respond with ONLY a valid JSON object, no markdown, in this exact shape:
 {
-  "intent": "create_delivery | track_order | question | greeting | unknown",
+  "intent": "create_delivery | track_order | cancel | question | greeting | unknown",
   "delivery": {
     "address": "",
     "customerPhone": "",
@@ -58,6 +62,7 @@ Rules:
 - "create_delivery": the vendor wants to send something. Fill any delivery fields you can
   extract; leave unknown fields as empty strings (or null for codAmount). Do not invent values.
 - "track_order": the vendor wants the status of an order. Put any code like AK123456 in trackingCode.
+- "cancel": the vendor wants to cancel, stop, abort, exit, or scrap the current delivery placement or operation.
 - "question": the vendor is asking something (fees, coverage, how it works, etc.). Put a helpful,
   concise best-effort answer in "answer". Always attempt an answer even if unsure, and keep it accurate
   to the facts above where they apply.
@@ -78,7 +83,7 @@ function normalizeResult(raw) {
   };
   if (!raw || typeof raw !== "object") return out;
 
-  const validIntents = ["create_delivery", "track_order", "question", "greeting", "unknown"];
+  const validIntents = ["create_delivery", "track_order", "cancel", "question", "greeting", "unknown"];
   if (validIntents.includes(raw.intent)) out.intent = raw.intent;
 
   if (raw.delivery && typeof raw.delivery === "object") {
@@ -100,26 +105,38 @@ async function understandMessage(text) {
     return normalizeResult(null);
   }
 
-  try {
-    const model = genAI.getGenerativeModel({ model: MODEL_NAME });
-    const result = await model.generateContent(buildPrompt(text));
-    const response = await result.response;
-    const textOutput = response.text();
+  let lastError = null;
 
-    // Gemini sometimes wraps JSON in code fences or stray text; extract the JSON object.
-    let cleaned = textOutput.replace(/```json|```/g, "").trim();
-    const firstBrace = cleaned.indexOf("{");
-    const lastBrace = cleaned.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+  for (const modelName of MODEL_CANDIDATES) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(buildPrompt(text));
+      const response = await result.response;
+      const textOutput = response.text();
+
+      let cleaned = textOutput.replace(/```json|```/g, "").trim();
+      const firstBrace = cleaned.indexOf("{");
+      const lastBrace = cleaned.lastIndexOf("}");
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        cleaned = cleaned.slice(firstBrace, lastBrace + 1);
+      }
+
+      const parsed = JSON.parse(cleaned);
+      return normalizeResult(parsed);
+    } catch (err) {
+      lastError = err;
+      // If model not found (404), continue to next model candidate
+      if (err.message && err.message.includes("404")) {
+        continue;
+      }
+      // For quota errors (429) or other errors, log and try next or break
+      console.warn(`Gemini model ${modelName} warning:`, err.message || err);
     }
-
-    const parsed = JSON.parse(cleaned);
-    return normalizeResult(parsed);
-  } catch (err) {
-    console.error("AI understandMessage failed, falling back to menu:", err.response?.data || err.message);
-    return normalizeResult(null);
   }
+
+  console.error("AI understandMessage failed across all candidates:", lastError?.message || lastError);
+  return normalizeResult(null);
 }
 
 module.exports = { understandMessage };
+
