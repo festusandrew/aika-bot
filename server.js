@@ -4,8 +4,10 @@ try { require('dotenv').config(); } catch (e) { /* dotenv optional — node --en
 const express = require("express");
 const axios = require("axios");
 
-// Determine the backend base URL — use Render-hosted URL in production, localhost in dev
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+// Production Hosted Backend (Render):
+const BACKEND_URL = process.env.BACKEND_URL || "https://aika-app-backend.onrender.com";
+// Local Development Backend (Uncomment when running locally):
+// const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
 
 const db = require("./db");
 const sessionManager = require("./session");
@@ -981,7 +983,8 @@ async function handleConfirmSummary(phone, buttonId, session) {
         category: stop.category || "General",
         deliveryFee: fee || 1500,
         codAmount: stop.codAmount || 0,
-        status: "available"
+        status: "available",
+        batchId: batchId,
       });
 
       console.log(`Synced delivery "${trackingCode}" to aika-Backend MongoDB`);
