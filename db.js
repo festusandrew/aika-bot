@@ -208,12 +208,44 @@ async function createDelivery(delivery) {
 
       // 2. Direct Sync into Job collection (read by Web Dashboard & Rider App)
       try {
+        let finalBatchId = delivery.batchId || "";
+
+        // Auto-batching check for unassigned vendor jobs
+        const rawPhone = String(delivery.vendorPhone || "").replace(/\D/g, "");
+        const last10Digits = rawPhone.length >= 10 ? rawPhone.slice(-10) : rawPhone;
+        const vName = vendorObj ? vendorObj.name : "WhatsApp Vendor";
+
+        const vendorConditions = [];
+        if (last10Digits.length >= 7) {
+          vendorConditions.push({ vendorPhone: { $regex: last10Digits } });
+        }
+        if (vName && vName !== "WhatsApp Vendor") {
+          vendorConditions.push({ "vendor.name": { $regex: vName, $options: "i" } });
+        }
+
+        if (vendorConditions.length > 0) {
+          const existingJobs = await Job.find({
+            $or: vendorConditions,
+            $or: [{ riderId: null }, { riderId: { $exists: false } }],
+            status: { $in: ["available", "searching"] },
+          });
+
+          if (existingJobs.length > 0) {
+            const existingBatchId = existingJobs.find(j => j.batchId)?.batchId;
+            finalBatchId = existingBatchId || ("BATCH-" + Math.floor(100000 + Math.random() * 900000));
+            await Job.updateMany(
+              { _id: { $in: existingJobs.map(j => j._id) } },
+              { $set: { batchId: finalBatchId } }
+            );
+          }
+        }
+
         await Job.create({
           orderNumber: trackingCode,
           trackingCode: trackingCode,
           vendorPhone: delivery.vendorPhone || "",
           vendor: {
-            name: vendorObj ? vendorObj.name : "WhatsApp Vendor",
+            name: vName,
             address: delivery.pickup || (vendorObj ? vendorObj.location : "Kaduna"),
             itemsDescription: delivery.item || delivery.category || "Package",
           },
@@ -227,8 +259,9 @@ async function createDelivery(delivery) {
           codAmount: cod,
           amountFormatted: `₦${(cod + fee).toLocaleString()}`,
           status: "available",
+          batchId: finalBatchId,
         });
-        console.log(`Directly created Job document "${trackingCode}" in MongoDB`);
+        console.log(`Directly created Job document "${trackingCode}" in MongoDB with batchId "${finalBatchId}"`);
       } catch (jobErr) {
         console.error("Direct Job creation error in bot:", jobErr.message);
       }
@@ -388,7 +421,28 @@ async function cancelDelivery(deliveryId) {
         { returnDocument: 'after' }
       ).lean();
 
-      if (cancelled) return { result: 'cancelled', delivery: cancelled };
+      if (cancelled) {
+        // Keep Job collection in sync for Web Dashboard and Rider App
+        try {
+          const targetCode = cancelled.tracking_code || deliveryId;
+          const targetJob = await Job.findOne({
+            $or: [{ orderNumber: targetCode }, { trackingCode: targetCode }]
+          });
+
+          if (targetJob) {
+            if (targetJob.batchId) {
+              await Job.updateMany({ batchId: targetJob.batchId }, { $set: { status: "cancelled" } });
+            } else {
+              targetJob.status = "cancelled";
+              await targetJob.save();
+            }
+          }
+        } catch (jErr) {
+          console.error("Job status cancel sync error in bot:", jErr.message);
+        }
+
+        return { result: 'cancelled', delivery: cancelled };
+      }
 
       // Determine if delivery exists but wasn't cancellable
       const existingQuery = !isNaN(numericId)
