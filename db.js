@@ -234,7 +234,7 @@ async function createDelivery(delivery) {
 
           if (existingJobs.length > 0) {
             const existingBatchId = existingJobs.find(j => j.batchId)?.batchId;
-            finalBatchId = existingBatchId || ("BATCH-" + Math.floor(100000 + Math.random() * 900000));
+            finalBatchId = delivery.batchId || existingBatchId || ("BATCH-" + Math.floor(100000 + Math.random() * 900000));
             await Job.updateMany(
               { _id: { $in: existingJobs.map(j => j._id) } },
               { $set: { batchId: finalBatchId } }
