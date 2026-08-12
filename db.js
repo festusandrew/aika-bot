@@ -94,7 +94,7 @@ if (mongoUri && mongoUri.startsWith("mongodb")) {
 
 const axios = require("axios");
 
-const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:5000";
+const BACKEND_URL = process.env.BACKEND_URL || "https://aika-app-backend.onrender.com";
 
 async function getVendor(phone) {
   if (!phone) return null;
@@ -225,8 +225,10 @@ async function createDelivery(delivery) {
 
         if (vendorConditions.length > 0) {
           const existingJobs = await Job.find({
-            $or: vendorConditions,
-            $or: [{ riderId: null }, { riderId: { $exists: false } }],
+            $and: [
+              { $or: vendorConditions },
+              { $or: [{ riderId: null }, { riderId: { $exists: false } }] },
+            ],
             status: { $in: ["available", "searching"] },
           });
 
